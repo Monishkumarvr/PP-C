@@ -2453,6 +2453,29 @@ class ShipmentFulfillmentAnalyzer:
             for variant, meta_list in orders_by_variant.items()
         }
 
+        # Calculate total available per part (optimizer deliveries + FG/SP WIP)
+        part_total_available = {}
+        part_total_ordered = {}
+        for meta in orders_meta:
+            part = meta['part']
+            part_total_ordered[part] = part_total_ordered.get(part, 0) + meta['ordered_qty']
+
+        for part in part_total_ordered:
+            # Sum optimizer deliveries for all variants of this part
+            optimizer_delivered = 0
+            for v, (p, _) in self.part_week_mapping.items():
+                if p == part and v in delivery_by_variant:
+                    optimizer_delivered += delivery_by_variant[v]['delivered']
+
+            # Add FG and SP WIP
+            wip = self.wip_by_part.get(part, {})
+            fg_wip = wip.get('FG', 0)
+            sp_wip = wip.get('SP', 0)
+
+            total_available = optimizer_delivered + fg_wip + sp_wip
+            # Cap at ordered quantity
+            part_total_available[part] = min(total_available, part_total_ordered[part])
+
         for meta in orders_meta:
             part = meta['part']
             ordered_qty = meta['ordered_qty']
@@ -2460,14 +2483,25 @@ class ShipmentFulfillmentAnalyzer:
             committed_date = meta['committed_date']
             variant = meta['variant']
 
-            variant_info = delivery_by_variant.get(variant)
-            total_variant_orders = variant_order_totals.get(variant, 0)
+            # Allocate proportionally from part's total available
+            total_ordered_for_part = part_total_ordered.get(part, 0)
+            total_available_for_part = part_total_available.get(part, 0)
 
-            if variant_info and total_variant_orders > 0:
-                delivered_qty = variant_info['delivered'] * (ordered_qty / total_variant_orders)
+            if total_ordered_for_part > 0 and total_available_for_part > 0:
+                # Proportional allocation
+                delivered_qty = total_available_for_part * (ordered_qty / total_ordered_for_part)
+                delivered_qty = min(delivered_qty, ordered_qty)  # Cap at ordered
                 unmet_qty = max(0.0, ordered_qty - delivered_qty)
                 fulfillment_pct = (delivered_qty / ordered_qty * 100) if ordered_qty > 0 else 0
-                actual_week = variant_info['actual_week']
+
+                # Determine actual delivery week
+                variant_info = delivery_by_variant.get(variant)
+                if variant_info and variant_info['actual_week']:
+                    actual_week = variant_info['actual_week']
+                else:
+                    # Fulfilled from WIP, use committed week
+                    actual_week = committed_week
+
                 if delivered_qty < 0.01:
                     status = 'Not Fulfilled'
                 elif unmet_qty > 0.01:
@@ -2479,25 +2513,11 @@ class ShipmentFulfillmentAnalyzer:
                 else:
                     status = 'Fulfilled'
             else:
-                wip = self.model.wip_init.get(part, {'FG': 0, 'SP': 0, 'MC': 0, 'GR': 0, 'CS': 0})
-                available_wip = wip.get('FG', 0) + wip.get('SP', 0)
-                actual_week = committed_week if available_wip > 0 else None
-
-                if available_wip >= ordered_qty:
-                    delivered_qty = ordered_qty
-                    unmet_qty = 0
-                    fulfillment_pct = 100.0
-                    status = 'Fulfilled from WIP'
-                elif available_wip > 0:
-                    delivered_qty = available_wip
-                    unmet_qty = ordered_qty - available_wip
-                    fulfillment_pct = (delivered_qty / ordered_qty * 100) if ordered_qty > 0 else 0
-                    status = 'Partial from WIP'
-                else:
-                    delivered_qty = 0
-                    unmet_qty = ordered_qty
-                    fulfillment_pct = 0
-                    status = 'Not Planned'
+                delivered_qty = 0
+                unmet_qty = ordered_qty
+                fulfillment_pct = 0
+                actual_week = None
+                status = 'Not Planned'
 
             if actual_week:
                 actual_date = self.config.CURRENT_DATE + timedelta(weeks=actual_week-1)
