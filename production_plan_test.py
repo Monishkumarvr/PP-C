@@ -1000,7 +1000,18 @@ class MachineResourceManager:
             return 0.0
     
     def get_machine_capacity(self, resource_code):
-        return self.machines.get(resource_code, {}).get('weekly_hours', 0)
+        """Get machine capacity with BVC→KVC mapping for Bidadi plant resources."""
+        # Direct lookup
+        if resource_code in self.machines:
+            return self.machines[resource_code].get('weekly_hours', 0)
+
+        # BVC to KVC mapping (Bidadi plant uses same machine types as Kulgachia)
+        if resource_code and resource_code.startswith('BVC'):
+            kvc_code = 'KVC' + resource_code[3:]
+            if kvc_code in self.machines:
+                return self.machines[kvc_code].get('weekly_hours', 0)
+
+        return 0
     
     def get_aggregated_capacity(self, operation_name):
         """Get total capacity for an operation type."""
