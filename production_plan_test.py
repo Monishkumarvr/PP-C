@@ -64,7 +64,7 @@ class ProductionConfig:
         self.PAINTING_LAG_WEEKS = 0
 
         # Minimum lead time
-        self.MIN_LEAD_TIME_WEEKS = 1  # Minimum lead time for production flexibility
+        self.MIN_LEAD_TIME_WEEKS = 2  # Minimum lead time (allows same-week grinding after casting)
         self.AVG_LEAD_TIME_WEEKS = 4  # Average lead time for forecasting beyond-horizon orders
 
         # Delivery flexibility
@@ -889,17 +889,24 @@ class ComprehensiveParameterBuilder:
         return params
     
     def _calculate_cooling_shakeout_weeks(self, part_params):
-        """Calculate cooling + shakeout time in weeks for a specific part."""
+        """Calculate cooling + shakeout time in weeks for a specific part.
+
+        Cooling and shakeout happen 24/7 (not just during work hours).
+        36 hours = 1.5 days, which fits within a single work week.
+        Only add a week delay if cooling exceeds 5 days (120 hours).
+        """
         cooling_hrs = part_params.get('cooling_time', 0)
         shakeout_hrs = part_params.get('shakeout_time', 0)
         total_hrs = cooling_hrs + shakeout_hrs
 
-        # Convert hours to weeks (24 hours/day * 6 working days/week = 144 hours/week)
-        # Round up to ensure we don't underestimate time
-        hours_per_week = self.config.WORKING_HOURS_PER_DAY * self.config.WORKING_DAYS_PER_WEEK
-        weeks = math.ceil(total_hrs / hours_per_week) if total_hrs > 0 else 0
-
-        return weeks
+        # If cooling fits within a work week (< 5 days), no extra week needed
+        # Cast Monday → cool/shakeout → grind by Friday (same week)
+        if total_hrs <= 120:  # 5 days × 24 hours
+            return 0
+        else:
+            # For longer cooling, calculate weeks needed
+            hours_per_week = 24 * 7
+            return math.ceil(total_hrs / hours_per_week)
 
     def _calculate_lead_time(self, part_params):
         """Flow-based lead time accounting for production pipeline.
@@ -1099,17 +1106,24 @@ class ComprehensiveOptimizationModel:
         self.y_part_line = None
 
     def _calculate_cooling_shakeout_weeks(self, part_params):
-        """Calculate cooling + shakeout time in weeks for a specific part."""
+        """Calculate cooling + shakeout time in weeks for a specific part.
+
+        Cooling and shakeout happen 24/7 (not just during work hours).
+        36 hours = 1.5 days, which fits within a single work week.
+        Only add a week delay if cooling exceeds 5 days (120 hours).
+        """
         cooling_hrs = part_params.get('cooling_time', 0)
         shakeout_hrs = part_params.get('shakeout_time', 0)
         total_hrs = cooling_hrs + shakeout_hrs
 
-        # Convert hours to weeks (24 hours/day * 6 working days/week = 144 hours/week)
-        # Round up to ensure we don't underestimate time
-        hours_per_week = self.config.WORKING_HOURS_PER_DAY * self.config.WORKING_DAYS_PER_WEEK
-        weeks = math.ceil(total_hrs / hours_per_week) if total_hrs > 0 else 0
-
-        return weeks
+        # If cooling fits within a work week (< 5 days), no extra week needed
+        # Cast Monday → cool/shakeout → grind by Friday (same week)
+        if total_hrs <= 120:  # 5 days × 24 hours
+            return 0
+        else:
+            # For longer cooling, calculate weeks needed
+            hours_per_week = 24 * 7
+            return math.ceil(total_hrs / hours_per_week)
     
     def build_and_solve(self):
         print("\n" + "="*80)
