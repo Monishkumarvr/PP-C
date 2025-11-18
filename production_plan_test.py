@@ -732,12 +732,14 @@ class WIPDemandCalculator:
         buffer = max(0, int(self.config.DELIVERY_BUFFER_WEEKS))
         
         # Preserve integer weekly order quantities first
+        # Include all orders even if net=0 (WIP fully covers demand)
+        # so that WIP can still be delivered
         for _, row in self.sales_order.iterrows():
             part = row['Material Code']
             qty = row['Balance Qty']
             delivery_date = row['Delivery_Date']
-            
-            if (qty or 0) <= 0 or part not in net_demand:
+
+            if (qty or 0) <= 0:
                 continue
             
             week_num = self._get_week_number(delivery_date)
@@ -761,15 +763,27 @@ class WIPDemandCalculator:
             net_part = max(0, net_demand.get(part, gross_part))
             wip_used = max(0, gross_part - net_part)
             wip_remaining = wip_used
-            
+
+            # Track if any variant kept for this part
+            part_has_variant = False
+
             for variant, week, qty in variants:
+                original_qty = qty
                 if wip_remaining > 0:
                     wip_take = min(wip_remaining, qty)
                     qty -= wip_take
                     wip_remaining -= wip_take
+
                 if qty > 0:
                     adjusted_split[variant] = qty
                     part_week_mapping[variant] = (part, week)
+                    part_has_variant = True
+                elif not part_has_variant and original_qty > 0:
+                    # Keep at least one variant for WIP delivery even if net=0
+                    # Use original_qty as demand (will be fulfilled from WIP)
+                    adjusted_split[variant] = original_qty
+                    part_week_mapping[variant] = (part, week)
+                    part_has_variant = True
                 else:
                     part_week_mapping.pop(variant, None)
                     variant_windows.pop(variant, None)
