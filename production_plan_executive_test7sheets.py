@@ -377,6 +377,13 @@ class FixedExecutiveReportGenerator:
         print("  📊 Creating machine utilization for ALL 8 stages...")
         
         weekly = self.data.get('Weekly_Summary', pd.DataFrame())
+        machines = self.data.get('Machine_Utilization', pd.DataFrame())
+
+        machines = self.data.get('Machine_Utilization', pd.DataFrame())
+        machines = self.data.get('Machine_Utilization', pd.DataFrame())
+        machines = self.data.get('Machine_Utilization', pd.DataFrame())
+        machines = self.data.get('Machine_Utilization', pd.DataFrame())
+        machines = self.data.get('Machine_Utilization', pd.DataFrame())
         
         if weekly.empty:
             print("    ⚠ No Weekly_Summary data available")
@@ -2041,9 +2048,9 @@ class FixedExecutiveReportGenerator:
             overview_rows.append(['', '', '', '', '', ''])
         
         # Weekly details - FIXED: Show ALL 8 stages
-        overview_rows.append(['WEEKLY CAPACITY DETAILS - ALL 8 STAGES', '', '', '', '', '', '', '', '', ''])
-        overview_rows.append(['', '', '', '', '', '', '', '', '', ''])
-        overview_rows.append(['Week', 'Cast%', 'Grind%', 'MC1%', 'MC2%', 'MC3%', 'SP1%', 'SP2%', 'SP3%', 'Status'])
+        overview_rows.append(['WEEKLY CAPACITY DETAILS - ALL 8 STAGES', '', '', '', '', '', '', '', '', '', '', ''])
+        overview_rows.append(['', '', '', '', '', '', '', '', '', '', '', ''])
+        overview_rows.append(['Week', 'Cast%', 'Grind%', 'MC1%', 'MC2%', 'MC3%', 'SP1%', 'SP2%', 'SP3%', 'Big Line%', 'Small Line%', 'Status'])
         
         if not machines.empty:
             for _, row in machines.iterrows():
@@ -2060,7 +2067,10 @@ class FixedExecutiveReportGenerator:
                 sp2_util = row.get('SP2_Util_%', 0)
                 sp3_util = row.get('SP3_Util_%', 0)
                 
-                max_util = max(cast_util, grind_util, mc1_util, mc2_util, mc3_util, sp1_util, sp2_util, sp3_util)
+                big_line_util = row.get('Big_Line_Util_%', 0)
+                small_line_util = row.get('Small_Line_Util_%', 0)
+                max_util = max(cast_util, grind_util, mc1_util, mc2_util, mc3_util, sp1_util, sp2_util, sp3_util,
+                               big_line_util, small_line_util)
                 
                 if max_util >= 95:
                     status = '🔴 Critical'
@@ -2079,6 +2089,8 @@ class FixedExecutiveReportGenerator:
                     f'{sp1_util:.1f}%',
                     f'{sp2_util:.1f}%',
                     f'{sp3_util:.1f}%',
+                    f'{big_line_util:.1f}%',
+                    f'{small_line_util:.1f}%',
                     status
                 ])
         
@@ -2087,9 +2099,9 @@ class FixedExecutiveReportGenerator:
     def create_material_flow(self):
         """SHEET 6: MATERIAL FLOW - Already has all 8 stages"""
         print("🔄 Creating Material Flow (ALL 8 STAGES)...")
-        
+
         weekly = self.data.get('Weekly_Summary', pd.DataFrame())
-        
+        machines = self.data.get('Machine_Utilization', pd.DataFrame())
         if weekly.empty:
             return pd.DataFrame([['No tonnage data available']])
         
@@ -2098,7 +2110,10 @@ class FixedExecutiveReportGenerator:
         flow_rows.append(['Track material through: Casting → Grinding → MC1 → MC2 → MC3 → SP1 → SP2 → SP3 → Delivery', '', '', '', '', '', '', '', '', '', ''])
         flow_rows.append(['', '', '', '', '', '', '', '', '', '', ''])
         
-        flow_rows.append(['Week', 'Casting', 'Grinding', 'MC1', 'MC2', 'MC3', 'SP1', 'SP2', 'SP3', 'Delivery', 'Notes'])
+        flow_rows.append([
+            'Week', 'Casting', 'Grinding', 'MC1', 'MC2', 'MC3', 'SP1', 'SP2', 'SP3',
+            'Delivery', 'Big Line Util %', 'Small Line Util %', 'Notes'
+        ])
         
         for _, row in weekly.iterrows():
             week = row.get('Week', None)
@@ -2124,10 +2139,14 @@ class FixedExecutiveReportGenerator:
                 f'{row.get("SP2_Units", 0):.0f}',
                 f'{row.get("SP3_Units", 0):.0f}',
                 f'{row.get("Delivery_Units", 0):.0f}',
+                f'{row.get("Big_Line_Util_%", 0):.1f}%' if 'Big_Line_Util_%' in row.index else '-',
+                f'{row.get("Small_Line_Util_%", 0):.1f}%' if 'Small_Line_Util_%' in row.index else '-',
                 ', '.join(notes) if notes else ''
             ])
         
-        flow_rows.append(['', '', '', '', '', '', '', '', '', '', ''])
+        flow_rows.append(['', '', '', '', '', '', '', '', '', '', '', '', ''])
+        big_util_avg = weekly['Big_Line_Util_%'].mean() if 'Big_Line_Util_%' in weekly.columns and len(weekly) > 0 else None
+        small_util_avg = weekly['Small_Line_Util_%'].mean() if 'Small_Line_Util_%' in weekly.columns and len(weekly) > 0 else None
         flow_rows.append([
             'TOTAL',
             f'{weekly["Casting_Tons"].sum():.0f}',
@@ -2139,6 +2158,8 @@ class FixedExecutiveReportGenerator:
             f'{weekly.get("SP2_Units", pd.Series([0])).sum():.0f}',
             f'{weekly.get("SP3_Units", pd.Series([0])).sum():.0f}',
             f'{weekly["Delivery_Units"].sum():.0f}',
+            f'{big_util_avg:.1f}%' if big_util_avg is not None else '-',
+            f'{small_util_avg:.1f}%' if small_util_avg is not None else '-',
             ''
         ])
         
@@ -2153,13 +2174,15 @@ class FixedExecutiveReportGenerator:
             f'{weekly.get("SP2_Units", pd.Series([0])).mean():.0f}',
             f'{weekly.get("SP3_Units", pd.Series([0])).mean():.0f}',
             f'{weekly["Delivery_Units"].mean():.0f}',
+            f'{big_util_avg:.1f}%' if big_util_avg is not None else '-',
+            f'{small_util_avg:.1f}%' if small_util_avg is not None else '-',
             ''
         ])
         
-        flow_rows.append(['', '', '', '', '', '', '', '', '', '', ''])
-        flow_rows.append(['COMPLETE STAGE FLOW ANALYSIS', '', '', '', '', '', '', '', '', '', ''])
-        flow_rows.append(['', '', '', '', '', '', '', '', '', '', ''])
-        flow_rows.append(['From Stage', 'To Stage', 'Total Flow', 'Avg Weekly', 'Balance Status', '', '', '', '', '', ''])
+        flow_rows.append(['', '', '', '', '', '', '', '', '', '', '', '', ''])
+        flow_rows.append(['COMPLETE STAGE FLOW ANALYSIS', '', '', '', '', '', '', '', '', '', '', '', ''])
+        flow_rows.append(['', '', '', '', '', '', '', '', '', '', '', '', ''])
+        flow_rows.append(['From Stage', 'To Stage', 'Total Flow', 'Avg Weekly', 'Balance Status', 'Avg Util %', 'Peak Util %', '', '', '', '', ''])
         
         transitions = [
             ('Casting', 'Grinding', weekly.get('Grinding_Units', pd.Series([0])).sum()),
@@ -2169,14 +2192,49 @@ class FixedExecutiveReportGenerator:
             ('MC3', 'SP1', weekly.get('SP1_Units', pd.Series([0])).sum()),
             ('SP1', 'SP2', weekly.get('SP2_Units', pd.Series([0])).sum()),
             ('SP2', 'SP3', weekly.get('SP3_Units', pd.Series([0])).sum()),
-            ('SP3', 'Delivery', weekly['Delivery_Units'].sum())
+            ('SP3', 'Delivery', weekly['Delivery_Units'].sum()),
+            ('Big Line', 'Capacity', weekly.get('Big_Line_Hours', pd.Series([0])).sum()),
+            ('Small Line', 'Capacity', weekly.get('Small_Line_Hours', pd.Series([0])).sum())
         ]
-        
+
+        util_lookup = {}
+        if not machines.empty:
+            stage_column_map = {
+                'Casting': 'Casting_Util_%',
+                'Grinding': 'Grinding_Util_%',
+                'MC1': 'MC1_Util_%',
+                'MC2': 'MC2_Util_%',
+                'MC3': 'MC3_Util_%',
+                'SP1': 'SP1_Util_%',
+                'SP2': 'SP2_Util_%',
+                'SP3': 'SP3_Util_%',
+                'Big Line': 'Big_Line_Util_%',
+                'Small Line': 'Small_Line_Util_%'
+            }
+            for stage_name, col_name in stage_column_map.items():
+                if col_name in machines.columns:
+                    util_lookup[stage_name] = (
+                        machines[col_name].mean(),
+                        machines[col_name].max()
+                    )
+
         for from_stage, to_stage, total in transitions:
             avg = total / self.num_weeks if self.num_weeks > 0 else 0
-            status = '✓ Balanced' if avg > 0 else '⚠ Check Flow'
-            flow_rows.append([from_stage, to_stage, f'{total:.0f}', f'{avg:.0f}', status, '', '', '', '', '', ''])
-        
+            status = '?o" Balanced' if avg > 0 else '?s? Check Flow'
+            util_avg, util_max = util_lookup.get(from_stage, (None, None))
+            flow_rows.append([
+                from_stage,
+                to_stage,
+                f'{total:.0f}',
+                f'{avg:.0f}',
+                status,
+                f'{util_avg:.1f}%' if util_avg is not None else '-',
+                f'{util_max:.1f}%' if util_max is not None else '-',
+                '',
+                '',
+                '',
+                ''
+            ])
         return pd.DataFrame(flow_rows)
 
     def create_gantt_timeline(self):
@@ -2265,6 +2323,7 @@ class FixedExecutiveReportGenerator:
         print("📅 Creating Daily Schedule with calendar dates and holidays...")
 
         daily = self.data.get('Daily_Schedule', pd.DataFrame())
+        weekly_summary = self.data.get('Weekly_Summary', pd.DataFrame())
 
         if daily.empty:
             return pd.DataFrame([['No daily schedule data available']])
@@ -2299,7 +2358,10 @@ class FixedExecutiveReportGenerator:
 
         schedule_rows.append(['DAILY PRODUCTION SCHEDULE', '', '', '', '', '', '', '', '', '', '', ''])
         schedule_rows.append(['', '', '', '', '', '', '', '', '', '', '', ''])
-        schedule_rows.append(['Week', 'Date', 'Day', 'Status', 'Holiday/Event', 'Casting', 'Grinding', 'MC1', 'MC2', 'MC3', 'SP1', 'SP2', 'SP3'])
+        schedule_rows.append([
+            'Week', 'Date', 'Day', 'Status', 'Holiday/Event', 'Casting', 'Grinding', 'MC1', 'MC2', 'MC3',
+            'SP1', 'SP2', 'SP3', 'Big Line (hrs)', 'Small Line (hrs)', 'Big Line Util %', 'Small Line Util %'
+        ])
 
         for idx, row in daily.iterrows():
             week = row.get('Week', '-')
@@ -2317,6 +2379,10 @@ class FixedExecutiveReportGenerator:
             sp1 = row.get('SP1_Units', 0)
             sp2 = row.get('SP2_Units', 0)
             sp3 = row.get('SP3_Units', 0)
+            big_line_hours = row.get('Big_Line_Hours', 0)
+            small_line_hours = row.get('Small_Line_Hours', 0)
+            big_line_util = row.get('Big_Line_Util_%', 0)
+            small_line_util = row.get('Small_Line_Util_%', 0)
 
             # Status icon
             if is_holiday == 'Yes':
@@ -2342,14 +2408,22 @@ class FixedExecutiveReportGenerator:
                 f'{mc3:.0f}' if mc3 > 0 else '-',
                 f'{sp1:.0f}' if sp1 > 0 else '-',
                 f'{sp2:.0f}' if sp2 > 0 else '-',
-                f'{sp3:.0f}' if sp3 > 0 else '-'
+                f'{sp3:.0f}' if sp3 > 0 else '-',
+                f'{big_line_hours:.1f}' if big_line_hours else '-',
+                f'{small_line_hours:.1f}' if small_line_hours else '-',
+                f'{big_line_util:.1f}%' if big_line_util else '-',
+                f'{small_line_util:.1f}%' if small_line_util else '-'
             ])
 
         # Add weekly aggregates
         schedule_rows.append(['', '', '', '', '', '', '', '', '', '', '', '', ''])
         schedule_rows.append(['WEEKLY TOTALS SUMMARY (All Weeks)', '', '', '', '', '', '', '', '', '', '', '', ''])
         schedule_rows.append(['', '', '', '', '', '', '', '', '', '', '', '', ''])
-        schedule_rows.append(['Week', 'Working Days', 'Holidays', 'Casting Tons', 'Grinding Units', 'MC1 Units', 'MC2 Units', 'MC3 Units', 'SP1 Units', 'SP2 Units', 'SP3 Units', '', ''])
+        schedule_rows.append([
+            'Week', 'Working Days', 'Holidays', 'Casting Tons', 'Grinding Units', 'MC1 Units',
+            'MC2 Units', 'MC3 Units', 'SP1 Units', 'SP2 Units', 'SP3 Units',
+            'Big Line (hrs)', 'Small Line (hrs)', 'Big Line Util %', 'Small Line Util %'
+        ])
 
         if 'Week' in daily.columns:
             weekly_grouped = daily.groupby('Week').agg({
@@ -2361,7 +2435,11 @@ class FixedExecutiveReportGenerator:
                 'MC3_Units': 'sum',
                 'SP1_Units': 'sum',
                 'SP2_Units': 'sum',
-                'SP3_Units': 'sum'
+                'SP3_Units': 'sum',
+                'Big_Line_Hours': 'sum',
+                'Small_Line_Hours': 'sum',
+                'Big_Line_Util_%': 'mean',
+                'Small_Line_Util_%': 'mean'
             }).reset_index()
 
             for _, wk_row in weekly_grouped.iterrows():
@@ -2381,10 +2459,11 @@ class FixedExecutiveReportGenerator:
                     f'{wk_row["SP1_Units"]:.0f}',
                     f'{wk_row["SP2_Units"]:.0f}',
                     f'{wk_row["SP3_Units"]:.0f}',
-                    '',
-                    ''
+                    f'{wk_row.get("Big_Line_Hours", 0):.1f}',
+                    f'{wk_row.get("Small_Line_Hours", 0):.1f}',
+                    f'{wk_row.get("Big_Line_Util_%", 0):.1f}%',
+                    f'{wk_row.get("Small_Line_Util_%", 0):.1f}%'
                 ])
-
         schedule_rows.append(['', '', '', '', '', '', '', '', '', '', '', '', ''])
         schedule_rows.append(['NOTES:', '', '', '', '', '', '', '', '', '', '', '', ''])
         schedule_rows.append(['🔴 HOLIDAY = No production (Sunday or National Holiday)', '', '', '', '', '', '', '', '', '', '', '', ''])
@@ -2392,6 +2471,20 @@ class FixedExecutiveReportGenerator:
         schedule_rows.append(['🟢 Working = Full production day (Monday-Friday)', '', '', '', '', '', '', '', '', '', '', '', ''])
         schedule_rows.append(['Production quantities are distributed evenly across working days in each week', '', '', '', '', '', '', '', '', '', '', '', ''])
 
+        if weekly_summary is not None and not weekly_summary.empty:
+            schedule_rows.append(['', '', '', '', '', '', '', '', '', '', '', '', ''])
+            schedule_rows.append(['MOULDING LINE UTILIZATION BY WEEK', '', '', '', '', '', '', '', '', '', '', '', ''])
+            schedule_rows.append(['', '', '', '', '', '', '', '', '', '', '', '', ''])
+            schedule_rows.append(['Week', 'Big Line Util %', 'Small Line Util %', 'Big Line Hours', 'Small Line Hours', '', '', '', '', '', '', '', ''])
+            for _, wk in weekly_summary.iterrows():
+                schedule_rows.append([
+                    f"W{int(wk['Week'])}" if not pd.isna(wk.get('Week')) else '-',
+                    f"{wk.get('Big_Line_Util_%', 0):.1f}%" if 'Big_Line_Util_%' in wk else '-',
+                    f"{wk.get('Small_Line_Util_%', 0):.1f}%" if 'Small_Line_Util_%' in wk else '-',
+                    f"{wk.get('Big_Line_Hours', 0):.1f}" if 'Big_Line_Hours' in wk else '-',
+                    f"{wk.get('Small_Line_Hours', 0):.1f}" if 'Small_Line_Hours' in wk else '-',
+                    '', '', '', '', '', '', '', ''
+                ])
         return pd.DataFrame(schedule_rows)
 
     def create_part_daily_schedule(self):
@@ -2399,6 +2492,8 @@ class FixedExecutiveReportGenerator:
         print("📋 Creating Part-Level Daily Schedule...")
 
         part_daily = self.data.get('Part_Daily_Schedule', pd.DataFrame())
+        weekly_summary = self.data.get('Weekly_Summary', pd.DataFrame())
+        machines = self.data.get('Machine_Utilization', pd.DataFrame())
 
         if part_daily.empty:
             return pd.DataFrame([['No part-level daily schedule data available']])
@@ -2443,6 +2538,42 @@ class FixedExecutiveReportGenerator:
 
             schedule_rows.extend(summary_data)
             schedule_rows.append(['', '', '', '', '', '', '', '', '', '', '', '', '', ''])
+
+            if (machines is not None and 'Big_Line_Util_%' in machines.columns) or \
+               (machines is not None and 'Small_Line_Util_%' in machines.columns):
+                schedule_rows.append(['MOULDING LINE CAPACITY UTILIZATION', '', '', '', '', '', '', '', '', '', '', '', '', ''])
+                schedule_rows.append(['', '', '', '', '', '', '', '', '', '', '', '', '', ''])
+                schedule_rows.append(['Line', 'Avg Util %', 'Max Util %', 'Total Hours', 'Capacity Hours', '', '', '', '', '', '', '', '', ''])
+
+                if machines is not None and 'Big_Line_Util_%' in machines.columns:
+                    big_avg = machines['Big_Line_Util_%'].mean()
+                    big_max = machines['Big_Line_Util_%'].max()
+                    big_hours = weekly_summary['Big_Line_Hours'].sum() if weekly_summary is not None and 'Big_Line_Hours' in weekly_summary.columns else 0
+                    big_cap = weekly_summary['Big_Line_Capacity_Hours'].sum() if weekly_summary is not None and 'Big_Line_Capacity_Hours' in weekly_summary.columns else ''
+                    schedule_rows.append([
+                        'Big Line',
+                        f'{big_avg:.1f}%',
+                        f'{big_max:.1f}%',
+                        f'{big_hours:.1f}',
+                        f'{big_cap:.1f}' if big_cap != '' else '',
+                        '', '', '', '', '', '', '', '', ''
+                    ])
+
+                if machines is not None and 'Small_Line_Util_%' in machines.columns:
+                    small_avg = machines['Small_Line_Util_%'].mean()
+                    small_max = machines['Small_Line_Util_%'].max()
+                    small_hours = weekly_summary['Small_Line_Hours'].sum() if weekly_summary is not None and 'Small_Line_Hours' in weekly_summary.columns else 0
+                    small_cap = weekly_summary['Small_Line_Capacity_Hours'].sum() if weekly_summary is not None and 'Small_Line_Capacity_Hours' in weekly_summary.columns else ''
+                    schedule_rows.append([
+                        'Small Line',
+                        f'{small_avg:.1f}%',
+                        f'{small_max:.1f}%',
+                        f'{small_hours:.1f}',
+                        f'{small_cap:.1f}' if small_cap != '' else '',
+                        '', '', '', '', '', '', '', '', ''
+                    ])
+
+                schedule_rows.append(['', '', '', '', '', '', '', '', '', '', '', '', '', ''])
 
         # CLEAN DATA-ONLY VIEW (no separators for Excel readability)
         schedule_rows.append(['PART-LEVEL DAILY PRODUCTION SCHEDULE - CLEAN DATA VIEW', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''])
@@ -3028,3 +3159,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+

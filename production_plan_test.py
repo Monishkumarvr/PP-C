@@ -183,10 +183,16 @@ class DailyScheduleGenerator:
                 weekly_sp2 = week_row.get('SP2_Units', 0)
                 weekly_sp3 = week_row.get('SP3_Units', 0)
                 weekly_delivery = week_row.get('Delivery_Units', 0)
+                weekly_big_line_hours = week_row.get('Big_Line_Hours', 0)
+                weekly_small_line_hours = week_row.get('Small_Line_Hours', 0)
+                weekly_big_line_util = week_row.get('Big_Line_Util_%', 0)
+                weekly_small_line_util = week_row.get('Small_Line_Util_%', 0)
             else:
                 # Week not in weekly_summary - use zeros (buffer weeks)
                 weekly_casting = weekly_grinding = weekly_mc1 = weekly_mc2 = weekly_mc3 = 0
                 weekly_sp1 = weekly_sp2 = weekly_sp3 = weekly_delivery = 0
+                weekly_big_line_hours = weekly_small_line_hours = 0
+                weekly_big_line_util = weekly_small_line_util = 0
 
             working_days = self.calendar.get_working_days_in_week(week_num)
             num_working_days = len(working_days)
@@ -210,7 +216,11 @@ class DailyScheduleGenerator:
                         'SP1_Units': weekly_sp1 / num_working_days if num_working_days > 0 else 0,
                         'SP2_Units': weekly_sp2 / num_working_days if num_working_days > 0 else 0,
                         'SP3_Units': weekly_sp3 / num_working_days if num_working_days > 0 else 0,
-                        'Delivery_Units': weekly_delivery / num_working_days if num_working_days > 0 else 0
+                        'Delivery_Units': weekly_delivery / num_working_days if num_working_days > 0 else 0,
+                        'Big_Line_Hours': weekly_big_line_hours / num_working_days if num_working_days > 0 else 0,
+                        'Small_Line_Hours': weekly_small_line_hours / num_working_days if num_working_days > 0 else 0,
+                        'Big_Line_Util_%': weekly_big_line_util,
+                        'Small_Line_Util_%': weekly_small_line_util
                     })
 
             # Add holiday rows for visibility
@@ -236,7 +246,11 @@ class DailyScheduleGenerator:
                         'SP1_Units': 0,
                         'SP2_Units': 0,
                         'SP3_Units': 0,
-                        'Delivery_Units': 0
+                        'Delivery_Units': 0,
+                        'Big_Line_Hours': 0,
+                        'Small_Line_Hours': 0,
+                        'Big_Line_Util_%': weekly_big_line_util,
+                        'Small_Line_Util_%': weekly_small_line_util
                     })
 
         return pd.DataFrame(daily_rows).sort_values(['Date'])
@@ -1912,49 +1926,110 @@ class ComprehensiveOptimizationModel:
                     )
     
     def _add_painting_constraints_by_stage(self):
-        """✅ FIXED: Painting constraints BY STAGE."""
-        print("  ✅ Adding painting constraints BY STAGE...")
+        """? Painting constraints per resource with fallback tonnage limits."""
+        print("  ? Adding painting constraints BY STAGE...")
         
-        PAINT_TOP_COAT_TON_PER_WEEK = 70 * 6
-        PAINT_PRIMER_TON_PER_WEEK = 100 * 6
+        stage_defs = [
+            ('SP1', 0, self.x_sp1, 'Painting Stage 1'),
+            ('SP2', 1, self.x_sp2, 'Painting Stage 2'),
+            ('SP3', 2, self.x_sp3, 'Painting Stage 3')
+        ]
         
-        # Get top coat and primer variants
-        top_coat_variants = [v for v in self.split_demand 
-                            if self.part_week_mapping[v][0] in self.params 
-                            and self.params[self.part_week_mapping[v][0]]['is_top_coat']]
-        primer_variants = [v for v in self.split_demand 
-                          if self.part_week_mapping[v][0] in self.params 
-                          and not self.params[self.part_week_mapping[v][0]]['is_top_coat']]
+        top_coat_variants = [v for v in self.split_demand
+                             if self.part_week_mapping[v][0] in self.params
+                             and self.params[self.part_week_mapping[v][0]]['is_top_coat']]
+        primer_variants = [v for v in self.split_demand
+                           if self.part_week_mapping[v][0] in self.params
+                           and not self.params[self.part_week_mapping[v][0]]['is_top_coat']]
         
-        for w in self.weeks:
-            # Top coat capacity (stage 3 - final coat)
-            top_terms = []
-            for v in top_coat_variants:
+        for stage_label, idx, stage_vars, op_name in stage_defs:
+            resource_entries = defaultdict(list)
+            all_entries = []
+            
+            for v in self.split_demand:
                 part, _ = self.part_week_mapping[v]
-                uw = self.params[part]['unit_weight']
-                if uw > 0:
-                    top_terms.append(self.x_sp3[(v, w)] * (uw / 1000.0))
+                if part not in self.params:
+                    continue
+                
+                params = self.params[part]
+                resources = params.get('paint_resources', [])
+                cycles = params.get('paint_cycles', [])
+                batches = params.get('paint_batches', [])
+                dry_times = params.get('paint_dry_times', [])
+                
+                if idx >= len(resources):
+                    continue
+                
+                resource_code = (resources[idx] or '').strip()
+                cycle = cycles[idx] if idx < len(cycles) else 0
+                batch = batches[idx] if idx < len(batches) else 1
+                dry_time = dry_times[idx] if idx < len(dry_times) else 0
+                
+                batch = max(1, batch or 1)
+                hours_per_unit = 0.0
+                if cycle and cycle > 0:
+                    hours_per_unit += (cycle / 60.0) * (1.0 / batch)
+                if dry_time and dry_time > 0:
+                    hours_per_unit += (dry_time) * (1.0 / batch)
+                
+                if hours_per_unit <= 0:
+                    continue
+                
+                all_entries.append((v, hours_per_unit))
+                
+                if resource_code and resource_code.lower() != 'nan':
+                    cap = self.machine_manager.get_machine_capacity(resource_code)
+                    if cap > 0:
+                        resource_entries[resource_code].append((v, hours_per_unit))
+                        continue
             
-            if top_terms:
-                self.model += (
-                    pulp.lpSum(top_terms) <= PAINT_TOP_COAT_TON_PER_WEEK * (1 + self.config.OVERTIME_ALLOWANCE),
-                    f"PaintTop_W{w}"
-                )
+            for res_code, plist in resource_entries.items():
+                cap = self.machine_manager.get_machine_capacity(res_code)
+                if cap <= 0:
+                    continue
+                for w in self.weeks:
+                    terms = [stage_vars[(v, w)] * hours for (v, hours) in plist]
+                    if terms:
+                        self.model += (
+                            pulp.lpSum(terms) <= cap * (1 + self.config.OVERTIME_ALLOWANCE),
+                            f"{stage_label}_Cap_{res_code}_W{w}"
+                        )
             
-            # Primer capacity (stage 3 - final coat)
-            prim_terms = []
-            for v in primer_variants:
-                part, _ = self.part_week_mapping[v]
-                uw = self.params[part]['unit_weight']
-                if uw > 0:
-                    prim_terms.append(self.x_sp3[(v, w)] * (uw / 1000.0))
-            
-            if prim_terms:
-                self.model += (
-                    pulp.lpSum(prim_terms) <= PAINT_PRIMER_TON_PER_WEEK * (1 + self.config.OVERTIME_ALLOWANCE),
-                    f"PaintPrim_W{w}"
-                )
-    
+            agg_cap = self.machine_manager.get_aggregated_capacity(op_name)
+            if agg_cap > 0 and all_entries:
+                for w in self.weeks:
+                    agg_terms = [stage_vars[(v, w)] * hours for (v, hours) in all_entries]
+                    if agg_terms:
+                        self.model += (
+                            pulp.lpSum(agg_terms) <= agg_cap * (1 + self.config.OVERTIME_ALLOWANCE),
+                            f"{stage_label}_AggCap_W{w}"
+                        )
+            elif stage_label == 'SP3':
+                PAINT_TOP_COAT_TON_PER_WEEK = 70 * 6
+                PAINT_PRIMER_TON_PER_WEEK = 100 * 6
+                for w in self.weeks:
+                    top_terms = []
+                    for v in top_coat_variants:
+                        part, _ = self.part_week_mapping[v]
+                        uw = self.params[part]['unit_weight']
+                        if uw > 0:
+                            top_terms.append(self.x_sp3[(v, w)] * (uw / 1000.0))
+                    if top_terms:
+                        self.model += (
+                            pulp.lpSum(top_terms) <= PAINT_TOP_COAT_TON_PER_WEEK * (1 + self.config.OVERTIME_ALLOWANCE),
+                            f"PaintTop_W{w}"
+                        )
+                    prim_terms = []
+                    for v in primer_variants:
+                        part, _ = self.part_week_mapping[v]
+                        uw = self.params[part]['unit_weight']
+                        if uw > 0:
+                            prim_terms.append(self.x_sp3[(v, w)] * (uw / 1000.0))
+                    if prim_terms:
+                        self.model += (
+                            pulp.lpSum(prim_terms) <= PAINT_PRIMER_TON_PER_WEEK * (1 + self.config.OVERTIME_ALLOWANCE),
+                            f"PaintPrim_W{w}"
+                        )
     def _add_box_constraints(self):
         box_variants = defaultdict(list)
         for v in self.split_demand:
