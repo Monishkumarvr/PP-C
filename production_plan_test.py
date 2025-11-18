@@ -1339,124 +1339,135 @@ class ComprehensiveOptimizationModel:
         ✅ COMPREHENSIVE: Flow constraints with stage seriality + part-specific cooling/shakeout delay.
 
         Flow: Casting → [cooling + shakeout] → Grinding → MC1 → MC2 → MC3 → SP1 → SP2 → SP3 → Delivery
+
+        CRITICAL FIX: WIP constraints are now aggregated at part level to properly share WIP
+        across all variants of the same part.
         """
         print("\n✅ Adding flow constraints with STAGE SERIALITY + PART-SPECIFIC COOLING/SHAKEOUT...")
 
         cnt = 0
 
+        # Group variants by part for aggregate constraints
+        variants_by_part = defaultdict(list)
+        for v in self.split_demand:
+            part, _ = self.part_week_mapping[v]
+            if part in self.params:
+                variants_by_part[part].append(v)
+
+        # First add PART-LEVEL aggregate constraints for WIP-to-production transitions
+        for part, variants in variants_by_part.items():
+            part_params = self.params[part]
+            cooling_lag = self._calculate_cooling_shakeout_weeks(part_params)
+            wip = self.wip_init.get(part, {'FG':0,'SP':0,'MC':0,'GR':0,'CS':0})
+
+            for w in self.weeks:
+                w_cooled = max(0, w - cooling_lag)
+
+                # ✅ AGGREGATE: Total grinding for all variants <= CS WIP + total casting
+                self.model += (
+                    pulp.lpSum(self.x_grinding[(v, t)] for v in variants for t in self.weeks if t <= w)
+                    <= pulp.lpSum(self.wip_consumed_cs[(part, t)] for t in self.weeks if t <= w) +
+                       pulp.lpSum(self.x_casting[(v, t)] for v in variants for t in self.weeks if t <= w_cooled),
+                    f"Agg_Cast_Grind_{part}_W{w}"
+                )
+                cnt += 1
+
+                # ✅ AGGREGATE: Total MC1 for all variants <= GR WIP + total grinding
+                if part_params.get('has_mc1', True):
+                    self.model += (
+                        pulp.lpSum(self.x_mc1[(v, t)] for v in variants for t in self.weeks if t <= w)
+                        <= pulp.lpSum(self.wip_consumed_gr[(part, t)] for t in self.weeks if t <= w) +
+                           pulp.lpSum(self.x_grinding[(v, t)] for v in variants for t in self.weeks if t <= w),
+                        f"Agg_Grind_MC1_{part}_W{w}"
+                    )
+                    cnt += 1
+
+                # ✅ AGGREGATE: Total SP1 for all variants <= MC WIP + total machining output
+                # For parts without machining, also include GR WIP
+                if part_params.get('has_mc3', True):
+                    mach_source = self.x_mc3
+                    has_machining = True
+                elif part_params.get('has_mc2', True):
+                    mach_source = self.x_mc2
+                    has_machining = True
+                elif part_params.get('has_mc1', True):
+                    mach_source = self.x_mc1
+                    has_machining = True
+                else:
+                    mach_source = self.x_grinding
+                    has_machining = False
+
+                if has_machining:
+                    # Has machining - SP1 ≤ MC WIP + last machining stage
+                    self.model += (
+                        pulp.lpSum(self.x_sp1[(v, t)] for v in variants for t in self.weeks if t <= w)
+                        <= pulp.lpSum(self.wip_consumed_mc[(part, t)] for t in self.weeks if t <= w) +
+                           pulp.lpSum(mach_source[(v, t)] for v in variants for t in self.weeks if t <= w),
+                        f"Agg_Mach_SP1_{part}_W{w}"
+                    )
+                else:
+                    # No machining - SP1 ≤ MC WIP + GR WIP + grinding
+                    self.model += (
+                        pulp.lpSum(self.x_sp1[(v, t)] for v in variants for t in self.weeks if t <= w)
+                        <= pulp.lpSum(self.wip_consumed_mc[(part, t)] for t in self.weeks if t <= w) +
+                           pulp.lpSum(self.wip_consumed_gr[(part, t)] for t in self.weeks if t <= w) +
+                           pulp.lpSum(mach_source[(v, t)] for v in variants for t in self.weeks if t <= w),
+                        f"Agg_Grind_SP1_{part}_W{w}"
+                    )
+                cnt += 1
+
+                # ✅ AGGREGATE: Total delivery for all variants <= SP WIP + FG WIP + total painting output
+                if part_params.get('has_sp3', True):
+                    paint_source = self.x_sp3
+                elif part_params.get('has_sp2', True):
+                    paint_source = self.x_sp2
+                else:
+                    paint_source = self.x_sp1
+
+                self.model += (
+                    pulp.lpSum(self.x_delivery[(v, t)] for v in variants for t in self.weeks if t <= w)
+                    <= wip['FG'] + pulp.lpSum(self.wip_consumed_sp[(part, t)] for t in self.weeks if t <= w) +
+                       pulp.lpSum(paint_source[(v, t)] for v in variants for t in self.weeks if t <= w),
+                    f"Agg_Paint_Deliv_{part}_W{w}"
+                )
+                cnt += 1
+
+        # Now add VARIANT-LEVEL constraints for internal stage seriality (MC2≤MC1, SP2≤SP1, etc.)
         for v in self.split_demand:
             part, _ = self.part_week_mapping[v]
             if part not in self.params:
                 continue
 
-            # Calculate part-specific cooling/shakeout lag in weeks
             part_params = self.params[part]
-            cooling_lag = self._calculate_cooling_shakeout_weeks(part_params)
-
-            wip = self.wip_init.get(part, {'FG':0,'SP':0,'MC':0,'GR':0,'CS':0})
 
             for w in self.weeks:
-                # ✅ FIX #2: Grinding ≤ CS WIP consumed + casting (with cooling delay)
-                w_cooled = max(0, w - cooling_lag)
-                self.model += (
-                    pulp.lpSum(self.x_grinding[(v, t)] for t in self.weeks if t <= w)
-                    <= pulp.lpSum(self.wip_consumed_cs[(part, t)] for t in self.weeks if t <= w) +
-                       pulp.lpSum(self.x_casting[(v, t)] for t in self.weeks if t <= w_cooled),
-                    f"Cum_Cast_Grind_{v}_W{w}"
-                )
-                cnt += 1
 
-                # ✅ ROUTING-AWARE: MC1 ≤ GR WIP consumed + grinding (only if part needs MC1)
-                if part_params.get('has_mc1', True):
+                # ✅ VARIANT-LEVEL: MC2 ≤ MC1 (internal seriality)
+                if part_params.get('has_mc2', True) and part_params.get('has_mc1', True):
                     self.model += (
-                        pulp.lpSum(self.x_mc1[(v, t)] for t in self.weeks if t <= w)
-                        <= pulp.lpSum(self.wip_consumed_gr[(part, t)] for t in self.weeks if t <= w) +
-                           pulp.lpSum(self.x_grinding[(v, t)] for t in self.weeks if t <= w),
-                        f"Cum_Grind_MC1_{v}_W{w}"
+                        pulp.lpSum(self.x_mc2[(v, t)] for t in self.weeks if t <= w)
+                        <= pulp.lpSum(self.x_mc1[(v, t)] for t in self.weeks if t <= w),
+                        f"Cum_MC1_MC2_{v}_W{w}"
                     )
                     cnt += 1
 
-                # ✅ ROUTING-AWARE: MC2 flow constraint (only if part needs MC2)
-                if part_params.get('has_mc2', True):
-                    if part_params.get('has_mc1', True):
-                        # Part uses MC1: MC2 ≤ MC1
-                        self.model += (
-                            pulp.lpSum(self.x_mc2[(v, t)] for t in self.weeks if t <= w)
-                            <= pulp.lpSum(self.x_mc1[(v, t)] for t in self.weeks if t <= w),
-                            f"Cum_MC1_MC2_{v}_W{w}"
-                        )
-                    else:
-                        # Part skips MC1: MC2 ≤ GR WIP + grinding
-                        self.model += (
-                            pulp.lpSum(self.x_mc2[(v, t)] for t in self.weeks if t <= w)
-                            <= pulp.lpSum(self.wip_consumed_gr[(part, t)] for t in self.weeks if t <= w) +
-                               pulp.lpSum(self.x_grinding[(v, t)] for t in self.weeks if t <= w),
-                            f"Cum_Grind_MC2_{v}_W{w}"
-                        )
-                    cnt += 1
-
-                # ✅ ROUTING-AWARE: MC3 flow constraint (only if part needs MC3)
+                # ✅ VARIANT-LEVEL: MC3 ≤ MC2 or MC1 (internal seriality)
                 if part_params.get('has_mc3', True):
                     if part_params.get('has_mc2', True):
-                        # Part uses MC2: MC3 ≤ MC2
                         self.model += (
                             pulp.lpSum(self.x_mc3[(v, t)] for t in self.weeks if t <= w)
                             <= pulp.lpSum(self.x_mc2[(v, t)] for t in self.weeks if t <= w),
                             f"Cum_MC2_MC3_{v}_W{w}"
                         )
                     elif part_params.get('has_mc1', True):
-                        # Part skips MC2 but has MC1: MC3 ≤ MC1
                         self.model += (
                             pulp.lpSum(self.x_mc3[(v, t)] for t in self.weeks if t <= w)
                             <= pulp.lpSum(self.x_mc1[(v, t)] for t in self.weeks if t <= w),
                             f"Cum_MC1_MC3_{v}_W{w}"
                         )
-                    else:
-                        # Part skips MC1 and MC2: MC3 ≤ GR WIP + grinding
-                        self.model += (
-                            pulp.lpSum(self.x_mc3[(v, t)] for t in self.weeks if t <= w)
-                            <= pulp.lpSum(self.wip_consumed_gr[(part, t)] for t in self.weeks if t <= w) +
-                               pulp.lpSum(self.x_grinding[(v, t)] for t in self.weeks if t <= w),
-                            f"Cum_Grind_MC3_{v}_W{w}"
-                        )
                     cnt += 1
 
-                # ✅ ROUTING-AWARE: SP1 ≤ MC WIP consumed + last machining stage (or grinding if no machining)
-                # Determine which stage feeds into SP1
-                if part_params.get('has_mc3', True):
-                    mach_source = self.x_mc3
-                    source_label = "MC3"
-                elif part_params.get('has_mc2', True):
-                    mach_source = self.x_mc2
-                    source_label = "MC2"
-                elif part_params.get('has_mc1', True):
-                    mach_source = self.x_mc1
-                    source_label = "MC1"
-                else:
-                    # No machining stages - SP1 feeds from grinding
-                    mach_source = self.x_grinding
-                    source_label = "Grind"
-
-                if source_label == "Grind":
-                    # No machining - SP1 ≤ MC WIP + GR WIP + grinding
-                    self.model += (
-                        pulp.lpSum(self.x_sp1[(v, t)] for t in self.weeks if t <= w)
-                        <= pulp.lpSum(self.wip_consumed_mc[(part, t)] for t in self.weeks if t <= w) +
-                           pulp.lpSum(self.wip_consumed_gr[(part, t)] for t in self.weeks if t <= w) +
-                           pulp.lpSum(mach_source[(v, t)] for t in self.weeks if t <= w),
-                        f"Cum_{source_label}_SP1_{v}_W{w}"
-                    )
-                else:
-                    # Has machining - SP1 ≤ MC WIP + last machining stage
-                    self.model += (
-                        pulp.lpSum(self.x_sp1[(v, t)] for t in self.weeks if t <= w)
-                        <= pulp.lpSum(self.wip_consumed_mc[(part, t)] for t in self.weeks if t <= w) +
-                           pulp.lpSum(mach_source[(v, t)] for t in self.weeks if t <= w),
-                        f"Cum_{source_label}_SP1_{v}_W{w}"
-                    )
-                cnt += 1
-
-                # ✅ ROUTING-AWARE: SP2 ≤ SP1 (only if part needs SP2)
+                # ✅ VARIANT-LEVEL: SP2 ≤ SP1 (internal seriality)
                 if part_params.get('has_sp2', True):
                     self.model += (
                         pulp.lpSum(self.x_sp2[(v, t)] for t in self.weeks if t <= w)
@@ -1465,43 +1476,21 @@ class ComprehensiveOptimizationModel:
                     )
                     cnt += 1
 
-                # ✅ ROUTING-AWARE: SP3 ≤ SP2 or SP1 (depending on routing)
+                # ✅ VARIANT-LEVEL: SP3 ≤ SP2 or SP1 (internal seriality)
                 if part_params.get('has_sp3', True):
                     if part_params.get('has_sp2', True):
-                        # Part uses SP2: SP3 ≤ SP2
                         self.model += (
                             pulp.lpSum(self.x_sp3[(v, t)] for t in self.weeks if t <= w)
                             <= pulp.lpSum(self.x_sp2[(v, t)] for t in self.weeks if t <= w),
                             f"Cum_SP2_SP3_{v}_W{w}"
                         )
                     else:
-                        # Part skips SP2: SP3 ≤ SP1 directly
                         self.model += (
                             pulp.lpSum(self.x_sp3[(v, t)] for t in self.weeks if t <= w)
                             <= pulp.lpSum(self.x_sp1[(v, t)] for t in self.weeks if t <= w),
                             f"Cum_SP1_SP3_{v}_W{w}"
                         )
                     cnt += 1
-
-                # ✅ ROUTING-AWARE: Delivery ≤ FG+SP WIP consumed + last painting stage
-                # Determine which painting stage feeds into delivery
-                if part_params.get('has_sp3', True):
-                    paint_source = self.x_sp3
-                    paint_label = "SP3"
-                elif part_params.get('has_sp2', True):
-                    paint_source = self.x_sp2
-                    paint_label = "SP2"
-                else:
-                    paint_source = self.x_sp1
-                    paint_label = "SP1"
-
-                self.model += (
-                    pulp.lpSum(self.x_delivery[(v, t)] for t in self.weeks if t <= w)
-                    <= pulp.lpSum(self.wip_consumed_sp[(part, t)] for t in self.weeks if t <= w) +
-                       (wip['FG'] + pulp.lpSum(paint_source[(v, t)] for t in self.weeks if t <= w)),
-                    f"Cum_{paint_label}_Deliv_{v}_W{w}"
-                )
-                cnt += 1
         
         # Print summary of cooling/shakeout times
         cooling_times = {}
