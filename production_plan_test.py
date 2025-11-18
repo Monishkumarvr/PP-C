@@ -1179,11 +1179,15 @@ class ComprehensiveOptimizationModel:
                 )
                 
                 # ✅ FIXED: Separate machining stage variables with routing awareness
-                self.x_mc1[(variant, w)] = pulp.LpVariable(
-                    f"mc1_{variant}_W{w}", lowBound=0, upBound=mach_ub, cat='Continuous'
-                )
+                # Only create MC1 if part routing requires it
+                if part_params.get('has_mc1', True):
+                    self.x_mc1[(variant, w)] = pulp.LpVariable(
+                        f"mc1_{variant}_W{w}", lowBound=0, upBound=mach_ub, cat='Continuous'
+                    )
+                else:
+                    self.x_mc1[(variant, w)] = 0  # Part skips MC1
 
-                # ✅ CRITICAL FIX: Only create MC2 if part routing requires it
+                # Only create MC2 if part routing requires it
                 if part_params.get('has_mc2', True):
                     self.x_mc2[(variant, w)] = pulp.LpVariable(
                         f"mc2_{variant}_W{w}", lowBound=0, upBound=mach_ub, cat='Continuous'
@@ -1191,7 +1195,7 @@ class ComprehensiveOptimizationModel:
                 else:
                     self.x_mc2[(variant, w)] = 0  # Part skips MC2
 
-                # ✅ CRITICAL FIX: Only create MC3 if part routing requires it
+                # Only create MC3 if part routing requires it
                 if part_params.get('has_mc3', True):
                     self.x_mc3[(variant, w)] = pulp.LpVariable(
                         f"mc3_{variant}_W{w}", lowBound=0, upBound=mach_ub, cat='Continuous'
@@ -1354,25 +1358,36 @@ class ComprehensiveOptimizationModel:
                 )
                 cnt += 1
 
-                # ✅ FIX #2: MC1 ≤ GR WIP consumed + grinding
-                self.model += (
-                    pulp.lpSum(self.x_mc1[(v, t)] for t in self.weeks if t <= w)
-                    <= pulp.lpSum(self.wip_consumed_gr[(part, t)] for t in self.weeks if t <= w) +
-                       pulp.lpSum(self.x_grinding[(v, t)] for t in self.weeks if t <= w),
-                    f"Cum_Grind_MC1_{v}_W{w}"
-                )
-                cnt += 1
-
-                # ✅ ROUTING-AWARE: MC2 ≤ MC1 (only if part needs MC2)
-                if part_params.get('has_mc2', True):
+                # ✅ ROUTING-AWARE: MC1 ≤ GR WIP consumed + grinding (only if part needs MC1)
+                if part_params.get('has_mc1', True):
                     self.model += (
-                        pulp.lpSum(self.x_mc2[(v, t)] for t in self.weeks if t <= w)
-                        <= pulp.lpSum(self.x_mc1[(v, t)] for t in self.weeks if t <= w),
-                        f"Cum_MC1_MC2_{v}_W{w}"
+                        pulp.lpSum(self.x_mc1[(v, t)] for t in self.weeks if t <= w)
+                        <= pulp.lpSum(self.wip_consumed_gr[(part, t)] for t in self.weeks if t <= w) +
+                           pulp.lpSum(self.x_grinding[(v, t)] for t in self.weeks if t <= w),
+                        f"Cum_Grind_MC1_{v}_W{w}"
                     )
                     cnt += 1
 
-                # ✅ ROUTING-AWARE: MC3 ≤ MC2 or MC1 (depending on routing)
+                # ✅ ROUTING-AWARE: MC2 flow constraint (only if part needs MC2)
+                if part_params.get('has_mc2', True):
+                    if part_params.get('has_mc1', True):
+                        # Part uses MC1: MC2 ≤ MC1
+                        self.model += (
+                            pulp.lpSum(self.x_mc2[(v, t)] for t in self.weeks if t <= w)
+                            <= pulp.lpSum(self.x_mc1[(v, t)] for t in self.weeks if t <= w),
+                            f"Cum_MC1_MC2_{v}_W{w}"
+                        )
+                    else:
+                        # Part skips MC1: MC2 ≤ GR WIP + grinding
+                        self.model += (
+                            pulp.lpSum(self.x_mc2[(v, t)] for t in self.weeks if t <= w)
+                            <= pulp.lpSum(self.wip_consumed_gr[(part, t)] for t in self.weeks if t <= w) +
+                               pulp.lpSum(self.x_grinding[(v, t)] for t in self.weeks if t <= w),
+                            f"Cum_Grind_MC2_{v}_W{w}"
+                        )
+                    cnt += 1
+
+                # ✅ ROUTING-AWARE: MC3 flow constraint (only if part needs MC3)
                 if part_params.get('has_mc3', True):
                     if part_params.get('has_mc2', True):
                         # Part uses MC2: MC3 ≤ MC2
@@ -1381,33 +1396,56 @@ class ComprehensiveOptimizationModel:
                             <= pulp.lpSum(self.x_mc2[(v, t)] for t in self.weeks if t <= w),
                             f"Cum_MC2_MC3_{v}_W{w}"
                         )
-                    else:
-                        # Part skips MC2: MC3 ≤ MC1 directly
+                    elif part_params.get('has_mc1', True):
+                        # Part skips MC2 but has MC1: MC3 ≤ MC1
                         self.model += (
                             pulp.lpSum(self.x_mc3[(v, t)] for t in self.weeks if t <= w)
                             <= pulp.lpSum(self.x_mc1[(v, t)] for t in self.weeks if t <= w),
                             f"Cum_MC1_MC3_{v}_W{w}"
                         )
+                    else:
+                        # Part skips MC1 and MC2: MC3 ≤ GR WIP + grinding
+                        self.model += (
+                            pulp.lpSum(self.x_mc3[(v, t)] for t in self.weeks if t <= w)
+                            <= pulp.lpSum(self.wip_consumed_gr[(part, t)] for t in self.weeks if t <= w) +
+                               pulp.lpSum(self.x_grinding[(v, t)] for t in self.weeks if t <= w),
+                            f"Cum_Grind_MC3_{v}_W{w}"
+                        )
                     cnt += 1
 
-                # ✅ ROUTING-AWARE: SP1 ≤ MC WIP consumed + last machining stage
-                # Determine which machining stage feeds into SP1
+                # ✅ ROUTING-AWARE: SP1 ≤ MC WIP consumed + last machining stage (or grinding if no machining)
+                # Determine which stage feeds into SP1
                 if part_params.get('has_mc3', True):
                     mach_source = self.x_mc3
                     source_label = "MC3"
                 elif part_params.get('has_mc2', True):
                     mach_source = self.x_mc2
                     source_label = "MC2"
-                else:
+                elif part_params.get('has_mc1', True):
                     mach_source = self.x_mc1
                     source_label = "MC1"
+                else:
+                    # No machining stages - SP1 feeds from grinding
+                    mach_source = self.x_grinding
+                    source_label = "Grind"
 
-                self.model += (
-                    pulp.lpSum(self.x_sp1[(v, t)] for t in self.weeks if t <= w)
-                    <= pulp.lpSum(self.wip_consumed_mc[(part, t)] for t in self.weeks if t <= w) +
-                       pulp.lpSum(mach_source[(v, t)] for t in self.weeks if t <= w),
-                    f"Cum_{source_label}_SP1_{v}_W{w}"
-                )
+                if source_label == "Grind":
+                    # No machining - SP1 ≤ MC WIP + GR WIP + grinding
+                    self.model += (
+                        pulp.lpSum(self.x_sp1[(v, t)] for t in self.weeks if t <= w)
+                        <= pulp.lpSum(self.wip_consumed_mc[(part, t)] for t in self.weeks if t <= w) +
+                           pulp.lpSum(self.wip_consumed_gr[(part, t)] for t in self.weeks if t <= w) +
+                           pulp.lpSum(mach_source[(v, t)] for t in self.weeks if t <= w),
+                        f"Cum_{source_label}_SP1_{v}_W{w}"
+                    )
+                else:
+                    # Has machining - SP1 ≤ MC WIP + last machining stage
+                    self.model += (
+                        pulp.lpSum(self.x_sp1[(v, t)] for t in self.weeks if t <= w)
+                        <= pulp.lpSum(self.wip_consumed_mc[(part, t)] for t in self.weeks if t <= w) +
+                           pulp.lpSum(mach_source[(v, t)] for t in self.weeks if t <= w),
+                        f"Cum_{source_label}_SP1_{v}_W{w}"
+                    )
                 cnt += 1
 
                 # ✅ ROUTING-AWARE: SP2 ≤ SP1 (only if part needs SP2)
