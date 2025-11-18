@@ -681,23 +681,26 @@ class WIPDemandCalculator:
             
             net_to_produce = remaining_delivery
             
-            # Determine where production STARTS
-            painting_start = net_to_produce
+            # Determine how many units need NEW production at each stage
+            # Flow: Casting → Grinding → Machining → Painting → Delivery
+            # WIP at each stage reduces upstream production needs
+
+            painting_start = net_to_produce  # Units needing painting
+
+            # MC WIP enters at painting, skipping machining
             mc_skip = min(wip.get('MC', 0), painting_start)
             wip_coverage[part]['MC'] = mc_skip
-            painting_start = max(0, painting_start - mc_skip)
-            
-            machining_start = painting_start + mc_skip
+            machining_start = painting_start - mc_skip  # Units needing machining
+
+            # GR WIP enters at machining, skipping grinding
             gr_skip = min(wip.get('GR', 0), machining_start)
             wip_coverage[part]['GR'] = gr_skip
-            machining_start = max(0, machining_start - gr_skip)
-            
-            grinding_start = machining_start + gr_skip
+            grinding_start = machining_start - gr_skip  # Units needing grinding
+
+            # CS WIP enters at grinding, skipping casting
             cs_skip = min(wip.get('CS', 0), grinding_start)
             wip_coverage[part]['CS'] = cs_skip
-            grinding_start = max(0, grinding_start - cs_skip)
-            
-            casting_start = grinding_start + cs_skip
+            casting_start = grinding_start - cs_skip  # Units needing casting
             
             stage_start_qty[part] = {
                 'gross': gross,
