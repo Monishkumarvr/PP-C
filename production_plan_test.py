@@ -1320,12 +1320,11 @@ class ComprehensiveOptimizationModel:
         for v in self.split_demand:
             objective_terms.append(self.config.UNMET_DEMAND_PENALTY * self.unmet_demand[v])
         
-        # Lateness penalty
+        # Lateness penalty - based on actual due date, not window_end
         for v in self.split_demand:
             _, due = self.part_week_mapping[v]
-            window_end = self.variant_windows.get(v, (due, due))[1]
             for w in self.weeks:
-                weeks_late = max(0, w - window_end)
+                weeks_late = max(0, w - due)
                 if weeks_late > 0:
                     objective_terms.append(
                         self.config.LATENESS_PENALTY * weeks_late * self.x_delivery[(v, w)]
