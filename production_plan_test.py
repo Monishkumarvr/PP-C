@@ -1118,8 +1118,8 @@ class ComprehensiveOptimizationModel:
         self._create_variables()
         self._build_objective()
         self._build_flow_constraints_with_stage_seriality()
-        self._add_wip_consumption_limits()
-        self._add_delivery_feasibility_constraints()
+        # Note: WIP consumption limits and delivery feasibility constraints are now
+        # incorporated directly into the flow constraints using initial WIP as inventory
         self._build_demand_constraints()
         self._build_lead_time_constraints()
         self._build_resource_constraints()
@@ -1355,6 +1355,7 @@ class ComprehensiveOptimizationModel:
                 variants_by_part[part].append(v)
 
         # First add PART-LEVEL aggregate constraints for WIP-to-production transitions
+        # WIP is initial inventory that flows through the same pipeline as new production
         for part, variants in variants_by_part.items():
             part_params = self.params[part]
             cooling_lag = self._calculate_cooling_shakeout_weeks(part_params)
@@ -1363,26 +1364,27 @@ class ComprehensiveOptimizationModel:
             for w in self.weeks:
                 w_cooled = max(0, w - cooling_lag)
 
-                # ✅ AGGREGATE: Total grinding for all variants <= CS WIP + total casting
+                # ✅ AGGREGATE: Total grinding <= initial CS WIP + total casting (with cooling delay)
+                # WIP is starting inventory, not a separate consumption variable
                 self.model += (
                     pulp.lpSum(self.x_grinding[(v, t)] for v in variants for t in self.weeks if t <= w)
-                    <= pulp.lpSum(self.wip_consumed_cs[(part, t)] for t in self.weeks if t <= w) +
+                    <= wip['CS'] +
                        pulp.lpSum(self.x_casting[(v, t)] for v in variants for t in self.weeks if t <= w_cooled),
                     f"Agg_Cast_Grind_{part}_W{w}"
                 )
                 cnt += 1
 
-                # ✅ AGGREGATE: Total MC1 for all variants <= GR WIP + total grinding
+                # ✅ AGGREGATE: Total MC1 <= initial GR WIP + total grinding
                 if part_params.get('has_mc1', True):
                     self.model += (
                         pulp.lpSum(self.x_mc1[(v, t)] for v in variants for t in self.weeks if t <= w)
-                        <= pulp.lpSum(self.wip_consumed_gr[(part, t)] for t in self.weeks if t <= w) +
+                        <= wip['GR'] +
                            pulp.lpSum(self.x_grinding[(v, t)] for v in variants for t in self.weeks if t <= w),
                         f"Agg_Grind_MC1_{part}_W{w}"
                     )
                     cnt += 1
 
-                # ✅ AGGREGATE: Total SP1 for all variants <= MC WIP + total machining output
+                # ✅ AGGREGATE: Total SP1 <= initial MC WIP + total machining output
                 # For parts without machining, also include GR WIP
                 if part_params.get('has_mc3', True):
                     mach_source = self.x_mc3
@@ -1401,7 +1403,7 @@ class ComprehensiveOptimizationModel:
                     # Has machining - SP1 ≤ MC WIP + last machining stage
                     self.model += (
                         pulp.lpSum(self.x_sp1[(v, t)] for v in variants for t in self.weeks if t <= w)
-                        <= pulp.lpSum(self.wip_consumed_mc[(part, t)] for t in self.weeks if t <= w) +
+                        <= wip['MC'] +
                            pulp.lpSum(mach_source[(v, t)] for v in variants for t in self.weeks if t <= w),
                         f"Agg_Mach_SP1_{part}_W{w}"
                     )
@@ -1409,14 +1411,13 @@ class ComprehensiveOptimizationModel:
                     # No machining - SP1 ≤ MC WIP + GR WIP + grinding
                     self.model += (
                         pulp.lpSum(self.x_sp1[(v, t)] for v in variants for t in self.weeks if t <= w)
-                        <= pulp.lpSum(self.wip_consumed_mc[(part, t)] for t in self.weeks if t <= w) +
-                           pulp.lpSum(self.wip_consumed_gr[(part, t)] for t in self.weeks if t <= w) +
+                        <= wip['MC'] + wip['GR'] +
                            pulp.lpSum(mach_source[(v, t)] for v in variants for t in self.weeks if t <= w),
                         f"Agg_Grind_SP1_{part}_W{w}"
                     )
                 cnt += 1
 
-                # ✅ AGGREGATE: Total delivery for all variants <= SP WIP + FG WIP + total painting output
+                # ✅ AGGREGATE: Total delivery <= initial FG+SP WIP + total painting output
                 if part_params.get('has_sp3', True):
                     paint_source = self.x_sp3
                 elif part_params.get('has_sp2', True):
@@ -1426,7 +1427,7 @@ class ComprehensiveOptimizationModel:
 
                 self.model += (
                     pulp.lpSum(self.x_delivery[(v, t)] for v in variants for t in self.weeks if t <= w)
-                    <= wip['FG'] + pulp.lpSum(self.wip_consumed_sp[(part, t)] for t in self.weeks if t <= w) +
+                    <= wip['FG'] + wip['SP'] +
                        pulp.lpSum(paint_source[(v, t)] for v in variants for t in self.weeks if t <= w),
                     f"Agg_Paint_Deliv_{part}_W{w}"
                 )
