@@ -64,7 +64,7 @@ class ProductionConfig:
         self.PAINTING_LAG_WEEKS = 0
 
         # Minimum lead time
-        self.MIN_LEAD_TIME_WEEKS = 0  # Removed minimum to maximize production flexibility
+        self.MIN_LEAD_TIME_WEEKS = 2  # Minimum lead time (allows same-week grinding after casting)
         self.AVG_LEAD_TIME_WEEKS = 4  # Average lead time for forecasting beyond-horizon orders
 
         # Delivery flexibility
@@ -83,7 +83,7 @@ class ProductionConfig:
         
         # Penalties
         self.UNMET_DEMAND_PENALTY = 200000  # Cost of not fulfilling orders (increased 5x to force fulfillment)
-        self.LATENESS_PENALTY = 50000  # Cost per week late (increased 2x to prioritize on-time delivery)
+        self.LATENESS_PENALTY = 150000  # Cost per week late (increased 3x from 50k to prioritize on-time delivery)
         self.INVENTORY_HOLDING_COST = 1  # Cost per unit per week for holding inventory (reduced 10x to encourage early production)
         self.MAX_EARLY_WEEKS = 8  # Maximum weeks to produce before delivery date (for inventory holding)
         self.STARTUP_BONUS = -50
@@ -695,23 +695,26 @@ class WIPDemandCalculator:
             
             net_to_produce = remaining_delivery
             
-            # Determine where production STARTS
-            painting_start = net_to_produce
+            # Determine how many units need NEW production at each stage
+            # Flow: Casting → Grinding → Machining → Painting → Delivery
+            # WIP at each stage reduces upstream production needs
+
+            painting_start = net_to_produce  # Units needing painting
+
+            # MC WIP enters at painting, skipping machining
             mc_skip = min(wip.get('MC', 0), painting_start)
             wip_coverage[part]['MC'] = mc_skip
-            painting_start = max(0, painting_start - mc_skip)
-            
-            machining_start = painting_start + mc_skip
+            machining_start = painting_start - mc_skip  # Units needing machining
+
+            # GR WIP enters at machining, skipping grinding
             gr_skip = min(wip.get('GR', 0), machining_start)
             wip_coverage[part]['GR'] = gr_skip
-            machining_start = max(0, machining_start - gr_skip)
-            
-            grinding_start = machining_start + gr_skip
+            grinding_start = machining_start - gr_skip  # Units needing grinding
+
+            # CS WIP enters at grinding, skipping casting
             cs_skip = min(wip.get('CS', 0), grinding_start)
             wip_coverage[part]['CS'] = cs_skip
-            grinding_start = max(0, grinding_start - cs_skip)
-            
-            casting_start = grinding_start + cs_skip
+            casting_start = grinding_start - cs_skip  # Units needing casting
             
             stage_start_qty[part] = {
                 'gross': gross,
@@ -746,12 +749,14 @@ class WIPDemandCalculator:
         buffer = max(0, int(self.config.DELIVERY_BUFFER_WEEKS))
         
         # Preserve integer weekly order quantities first
+        # Include all orders even if net=0 (WIP fully covers demand)
+        # so that WIP can still be delivered
         for _, row in self.sales_order.iterrows():
             part = row['Material Code']
             qty = row['Balance Qty']
             delivery_date = row['Delivery_Date']
-            
-            if (qty or 0) <= 0 or part not in net_demand:
+
+            if (qty or 0) <= 0:
                 continue
             
             week_num = self._get_week_number(delivery_date)
@@ -775,15 +780,27 @@ class WIPDemandCalculator:
             net_part = max(0, net_demand.get(part, gross_part))
             wip_used = max(0, gross_part - net_part)
             wip_remaining = wip_used
-            
+
+            # Track if any variant kept for this part
+            part_has_variant = False
+
             for variant, week, qty in variants:
+                original_qty = qty
                 if wip_remaining > 0:
                     wip_take = min(wip_remaining, qty)
                     qty -= wip_take
                     wip_remaining -= wip_take
+
                 if qty > 0:
                     adjusted_split[variant] = qty
                     part_week_mapping[variant] = (part, week)
+                    part_has_variant = True
+                elif not part_has_variant and original_qty > 0:
+                    # Keep at least one variant for WIP delivery even if net=0
+                    # Use original_qty as demand (will be fulfilled from WIP)
+                    adjusted_split[variant] = original_qty
+                    part_week_mapping[variant] = (part, week)
+                    part_has_variant = True
                 else:
                     part_week_mapping.pop(variant, None)
                     variant_windows.pop(variant, None)
@@ -903,39 +920,46 @@ class ComprehensiveParameterBuilder:
         return params
     
     def _calculate_cooling_shakeout_weeks(self, part_params):
-        """Calculate cooling + shakeout time in weeks for a specific part."""
+        """Calculate cooling + shakeout time in weeks for a specific part.
+
+        Cooling and shakeout happen 24/7 (not just during work hours).
+        36 hours = 1.5 days, which fits within a single work week.
+        Only add a week delay if cooling exceeds 5 days (120 hours).
+        """
         cooling_hrs = part_params.get('cooling_time', 0)
         shakeout_hrs = part_params.get('shakeout_time', 0)
         total_hrs = cooling_hrs + shakeout_hrs
 
-        # Convert hours to weeks (24 hours/day * 6 working days/week = 144 hours/week)
-        # Round up to ensure we don't underestimate time
-        hours_per_week = self.config.WORKING_HOURS_PER_DAY * self.config.WORKING_DAYS_PER_WEEK
-        weeks = math.ceil(total_hrs / hours_per_week) if total_hrs > 0 else 0
-
-        return weeks
+        # If cooling fits within a work week (< 5 days), no extra week needed
+        # Cast Monday → cool/shakeout → grind by Friday (same week)
+        if total_hrs <= 120:  # 5 days × 24 hours
+            return 0
+        else:
+            # For longer cooling, calculate weeks needed
+            hours_per_week = 24 * 7
+            return math.ceil(total_hrs / hours_per_week)
 
     def _calculate_lead_time(self, part_params):
-        """Flow-based lead time."""
-        stages = 0
-        if part_params['casting_cycle'] > 0:
-            stages += 1
-        if part_params['grind_cycle'] > 0:
-            stages += 1
-        if any(c > 0 for c in part_params['mach_cycles']):
-            stages += 1
-        if any(c > 0 for c in part_params['paint_cycles']):
-            stages += 1
+        """Flow-based lead time accounting for production pipeline.
 
+        Lead time must account for:
+        1. Cooling/shakeout delay after casting
+        2. Buffer for parts to flow through production stages
+
+        Formula: cooling_weeks + 2 (for grinding → machining → painting flow)
+        This balances early production with feasibility for early-week orders.
+        """
         # Include part-specific cooling/shakeout time
         cooling_shakeout_weeks = self._calculate_cooling_shakeout_weeks(part_params)
 
-        lags = (cooling_shakeout_weeks +
-                self.config.GRINDING_LAG_WEEKS +
+        # Other inter-stage lags (typically 0)
+        lags = (self.config.GRINDING_LAG_WEEKS +
                 self.config.MACHINING_LAG_WEEKS +
                 self.config.PAINTING_LAG_WEEKS)
 
-        return max(self.config.MIN_LEAD_TIME_WEEKS, stages + lags)
+        # Lead time = cooling + 2 weeks buffer for production flow
+        # This allows: cast(W) → grind(W+1) → machine(W+2) → paint(W+2) → deliver(W+3)
+        return max(self.config.MIN_LEAD_TIME_WEEKS, cooling_shakeout_weeks + 2 + lags)
     
     def _safe_float(self, value):
         try:
@@ -1014,7 +1038,18 @@ class MachineResourceManager:
             return 0.0
     
     def get_machine_capacity(self, resource_code):
-        return self.machines.get(resource_code, {}).get('weekly_hours', 0)
+        """Get machine capacity with BVC→KVC mapping for Bidadi plant resources."""
+        # Direct lookup
+        if resource_code in self.machines:
+            return self.machines[resource_code].get('weekly_hours', 0)
+
+        # BVC to KVC mapping (Bidadi plant uses same machine types as Kulgachia)
+        if resource_code and resource_code.startswith('BVC'):
+            kvc_code = 'KVC' + resource_code[3:]
+            if kvc_code in self.machines:
+                return self.machines[kvc_code].get('weekly_hours', 0)
+
+        return 0
     
     def get_aggregated_capacity(self, operation_name):
         """Get total capacity for an operation type."""
@@ -1102,17 +1137,24 @@ class ComprehensiveOptimizationModel:
         self.y_part_line = None
 
     def _calculate_cooling_shakeout_weeks(self, part_params):
-        """Calculate cooling + shakeout time in weeks for a specific part."""
+        """Calculate cooling + shakeout time in weeks for a specific part.
+
+        Cooling and shakeout happen 24/7 (not just during work hours).
+        36 hours = 1.5 days, which fits within a single work week.
+        Only add a week delay if cooling exceeds 5 days (120 hours).
+        """
         cooling_hrs = part_params.get('cooling_time', 0)
         shakeout_hrs = part_params.get('shakeout_time', 0)
         total_hrs = cooling_hrs + shakeout_hrs
 
-        # Convert hours to weeks (24 hours/day * 6 working days/week = 144 hours/week)
-        # Round up to ensure we don't underestimate time
-        hours_per_week = self.config.WORKING_HOURS_PER_DAY * self.config.WORKING_DAYS_PER_WEEK
-        weeks = math.ceil(total_hrs / hours_per_week) if total_hrs > 0 else 0
-
-        return weeks
+        # If cooling fits within a work week (< 5 days), no extra week needed
+        # Cast Monday → cool/shakeout → grind by Friday (same week)
+        if total_hrs <= 120:  # 5 days × 24 hours
+            return 0
+        else:
+            # For longer cooling, calculate weeks needed
+            hours_per_week = 24 * 7
+            return math.ceil(total_hrs / hours_per_week)
     
     def build_and_solve(self):
         print("\n" + "="*80)
@@ -1124,8 +1166,8 @@ class ComprehensiveOptimizationModel:
         self._create_variables()
         self._build_objective()
         self._build_flow_constraints_with_stage_seriality()
-        self._add_wip_consumption_limits()
-        self._add_delivery_feasibility_constraints()
+        # Note: WIP consumption limits and delivery feasibility constraints are now
+        # incorporated directly into the flow constraints using initial WIP as inventory
         self._build_demand_constraints()
         self._build_lead_time_constraints()
         self._build_resource_constraints()
@@ -1193,11 +1235,15 @@ class ComprehensiveOptimizationModel:
                 )
                 
                 # ✅ FIXED: Separate machining stage variables with routing awareness
-                self.x_mc1[(variant, w)] = pulp.LpVariable(
-                    f"mc1_{variant}_W{w}", lowBound=0, upBound=mach_ub, cat='Continuous'
-                )
+                # Only create MC1 if part routing requires it
+                if part_params.get('has_mc1', True):
+                    self.x_mc1[(variant, w)] = pulp.LpVariable(
+                        f"mc1_{variant}_W{w}", lowBound=0, upBound=mach_ub, cat='Continuous'
+                    )
+                else:
+                    self.x_mc1[(variant, w)] = 0  # Part skips MC1
 
-                # ✅ CRITICAL FIX: Only create MC2 if part routing requires it
+                # Only create MC2 if part routing requires it
                 if part_params.get('has_mc2', True):
                     self.x_mc2[(variant, w)] = pulp.LpVariable(
                         f"mc2_{variant}_W{w}", lowBound=0, upBound=mach_ub, cat='Continuous'
@@ -1205,7 +1251,7 @@ class ComprehensiveOptimizationModel:
                 else:
                     self.x_mc2[(variant, w)] = 0  # Part skips MC2
 
-                # ✅ CRITICAL FIX: Only create MC3 if part routing requires it
+                # Only create MC3 if part routing requires it
                 if part_params.get('has_mc3', True):
                     self.x_mc3[(variant, w)] = pulp.LpVariable(
                         f"mc3_{variant}_W{w}", lowBound=0, upBound=mach_ub, cat='Continuous'
@@ -1305,12 +1351,11 @@ class ComprehensiveOptimizationModel:
         for v in self.split_demand:
             objective_terms.append(self.config.UNMET_DEMAND_PENALTY * self.unmet_demand[v])
         
-        # Lateness penalty
+        # Lateness penalty - based on actual due date, not window_end
         for v in self.split_demand:
             _, due = self.part_week_mapping[v]
-            window_end = self.variant_windows.get(v, (due, due))[1]
             for w in self.weeks:
-                weeks_late = max(0, w - window_end)
+                weeks_late = max(0, w - due)
                 if weeks_late > 0:
                     objective_terms.append(
                         self.config.LATENESS_PENALTY * weeks_late * self.x_delivery[(v, w)]
@@ -1341,44 +1386,112 @@ class ComprehensiveOptimizationModel:
         ✅ COMPREHENSIVE: Flow constraints with stage seriality + part-specific cooling/shakeout delay.
 
         Flow: Casting → [cooling + shakeout] → Grinding → MC1 → MC2 → MC3 → SP1 → SP2 → SP3 → Delivery
+
+        CRITICAL FIX: WIP constraints are now aggregated at part level to properly share WIP
+        across all variants of the same part.
         """
         print("\n✅ Adding flow constraints with STAGE SERIALITY + PART-SPECIFIC COOLING/SHAKEOUT...")
 
         cnt = 0
 
+        # Group variants by part for aggregate constraints
+        variants_by_part = defaultdict(list)
+        for v in self.split_demand:
+            part, _ = self.part_week_mapping[v]
+            if part in self.params:
+                variants_by_part[part].append(v)
+
+        # First add PART-LEVEL aggregate constraints for WIP-to-production transitions
+        # WIP is initial inventory that flows through the same pipeline as new production
+        for part, variants in variants_by_part.items():
+            part_params = self.params[part]
+            cooling_lag = self._calculate_cooling_shakeout_weeks(part_params)
+            wip = self.wip_init.get(part, {'FG':0,'SP':0,'MC':0,'GR':0,'CS':0})
+
+            for w in self.weeks:
+                w_cooled = max(0, w - cooling_lag)
+
+                # ✅ AGGREGATE: Total grinding <= initial CS WIP + total casting (with cooling delay)
+                # WIP is starting inventory, not a separate consumption variable
+                self.model += (
+                    pulp.lpSum(self.x_grinding[(v, t)] for v in variants for t in self.weeks if t <= w)
+                    <= wip['CS'] +
+                       pulp.lpSum(self.x_casting[(v, t)] for v in variants for t in self.weeks if t <= w_cooled),
+                    f"Agg_Cast_Grind_{part}_W{w}"
+                )
+                cnt += 1
+
+                # ✅ AGGREGATE: Total MC1 <= initial GR WIP + total grinding
+                if part_params.get('has_mc1', True):
+                    self.model += (
+                        pulp.lpSum(self.x_mc1[(v, t)] for v in variants for t in self.weeks if t <= w)
+                        <= wip['GR'] +
+                           pulp.lpSum(self.x_grinding[(v, t)] for v in variants for t in self.weeks if t <= w),
+                        f"Agg_Grind_MC1_{part}_W{w}"
+                    )
+                    cnt += 1
+
+                # ✅ AGGREGATE: Total SP1 <= initial MC WIP + total machining output
+                # For parts without machining, also include GR WIP
+                if part_params.get('has_mc3', True):
+                    mach_source = self.x_mc3
+                    has_machining = True
+                elif part_params.get('has_mc2', True):
+                    mach_source = self.x_mc2
+                    has_machining = True
+                elif part_params.get('has_mc1', True):
+                    mach_source = self.x_mc1
+                    has_machining = True
+                else:
+                    mach_source = self.x_grinding
+                    has_machining = False
+
+                if has_machining:
+                    # Has machining - SP1 ≤ MC WIP + last machining stage
+                    self.model += (
+                        pulp.lpSum(self.x_sp1[(v, t)] for v in variants for t in self.weeks if t <= w)
+                        <= wip['MC'] +
+                           pulp.lpSum(mach_source[(v, t)] for v in variants for t in self.weeks if t <= w),
+                        f"Agg_Mach_SP1_{part}_W{w}"
+                    )
+                else:
+                    # No machining - SP1 ≤ MC WIP + GR WIP + grinding
+                    self.model += (
+                        pulp.lpSum(self.x_sp1[(v, t)] for v in variants for t in self.weeks if t <= w)
+                        <= wip['MC'] + wip['GR'] +
+                           pulp.lpSum(mach_source[(v, t)] for v in variants for t in self.weeks if t <= w),
+                        f"Agg_Grind_SP1_{part}_W{w}"
+                    )
+                cnt += 1
+
+                # ✅ AGGREGATE: Total delivery <= initial FG+SP WIP + total painting output
+                if part_params.get('has_sp3', True):
+                    paint_source = self.x_sp3
+                elif part_params.get('has_sp2', True):
+                    paint_source = self.x_sp2
+                else:
+                    paint_source = self.x_sp1
+
+                self.model += (
+                    pulp.lpSum(self.x_delivery[(v, t)] for v in variants for t in self.weeks if t <= w)
+                    <= wip['FG'] + wip['SP'] +
+                       pulp.lpSum(paint_source[(v, t)] for v in variants for t in self.weeks if t <= w),
+                    f"Agg_Paint_Deliv_{part}_W{w}"
+                )
+                cnt += 1
+
+        # Now add VARIANT-LEVEL constraints for internal stage seriality (MC2≤MC1, SP2≤SP1, etc.)
         for v in self.split_demand:
             part, _ = self.part_week_mapping[v]
             if part not in self.params:
                 continue
 
-            # Calculate part-specific cooling/shakeout lag in weeks
             part_params = self.params[part]
-            cooling_lag = self._calculate_cooling_shakeout_weeks(part_params)
-
-            wip = self.wip_init.get(part, {'FG':0,'SP':0,'MC':0,'GR':0,'CS':0})
 
             for w in self.weeks:
-                # ✅ FIX #2: Grinding ≤ CS WIP consumed + casting (with cooling delay)
-                w_cooled = max(0, w - cooling_lag)
-                self.model += (
-                    pulp.lpSum(self.x_grinding[(v, t)] for t in self.weeks if t <= w)
-                    <= pulp.lpSum(self.wip_consumed_cs[(part, t)] for t in self.weeks if t <= w) +
-                       pulp.lpSum(self.x_casting[(v, t)] for t in self.weeks if t <= w_cooled),
-                    f"Cum_Cast_Grind_{v}_W{w}"
-                )
-                cnt += 1
 
-                # ✅ FIX #2: MC1 ≤ GR WIP consumed + grinding
-                self.model += (
-                    pulp.lpSum(self.x_mc1[(v, t)] for t in self.weeks if t <= w)
-                    <= pulp.lpSum(self.wip_consumed_gr[(part, t)] for t in self.weeks if t <= w) +
-                       pulp.lpSum(self.x_grinding[(v, t)] for t in self.weeks if t <= w),
-                    f"Cum_Grind_MC1_{v}_W{w}"
-                )
-                cnt += 1
-
-                # ✅ ROUTING-AWARE: MC2 ≤ MC1 (only if part needs MC2)
-                if part_params.get('has_mc2', True):
+                # ✅ VARIANT-LEVEL: MC2 ≤ MC1 (internal seriality)
+                if part_params.get('has_mc2', True) and part_params.get('has_mc1', True):
                     self.model += (
                         pulp.lpSum(self.x_mc2[(v, t)] for t in self.weeks if t <= w)
                         <= pulp.lpSum(self.x_mc1[(v, t)] for t in self.weeks if t <= w),
@@ -1386,17 +1499,15 @@ class ComprehensiveOptimizationModel:
                     )
                     cnt += 1
 
-                # ✅ ROUTING-AWARE: MC3 ≤ MC2 or MC1 (depending on routing)
+                # ✅ VARIANT-LEVEL: MC3 ≤ MC2 or MC1 (internal seriality)
                 if part_params.get('has_mc3', True):
                     if part_params.get('has_mc2', True):
-                        # Part uses MC2: MC3 ≤ MC2
                         self.model += (
                             pulp.lpSum(self.x_mc3[(v, t)] for t in self.weeks if t <= w)
                             <= pulp.lpSum(self.x_mc2[(v, t)] for t in self.weeks if t <= w),
                             f"Cum_MC2_MC3_{v}_W{w}"
                         )
-                    else:
-                        # Part skips MC2: MC3 ≤ MC1 directly
+                    elif part_params.get('has_mc1', True):
                         self.model += (
                             pulp.lpSum(self.x_mc3[(v, t)] for t in self.weeks if t <= w)
                             <= pulp.lpSum(self.x_mc1[(v, t)] for t in self.weeks if t <= w),
@@ -1404,27 +1515,7 @@ class ComprehensiveOptimizationModel:
                         )
                     cnt += 1
 
-                # ✅ ROUTING-AWARE: SP1 ≤ MC WIP consumed + last machining stage
-                # Determine which machining stage feeds into SP1
-                if part_params.get('has_mc3', True):
-                    mach_source = self.x_mc3
-                    source_label = "MC3"
-                elif part_params.get('has_mc2', True):
-                    mach_source = self.x_mc2
-                    source_label = "MC2"
-                else:
-                    mach_source = self.x_mc1
-                    source_label = "MC1"
-
-                self.model += (
-                    pulp.lpSum(self.x_sp1[(v, t)] for t in self.weeks if t <= w)
-                    <= pulp.lpSum(self.wip_consumed_mc[(part, t)] for t in self.weeks if t <= w) +
-                       pulp.lpSum(mach_source[(v, t)] for t in self.weeks if t <= w),
-                    f"Cum_{source_label}_SP1_{v}_W{w}"
-                )
-                cnt += 1
-
-                # ✅ ROUTING-AWARE: SP2 ≤ SP1 (only if part needs SP2)
+                # ✅ VARIANT-LEVEL: SP2 ≤ SP1 (internal seriality)
                 if part_params.get('has_sp2', True):
                     self.model += (
                         pulp.lpSum(self.x_sp2[(v, t)] for t in self.weeks if t <= w)
@@ -1433,43 +1524,21 @@ class ComprehensiveOptimizationModel:
                     )
                     cnt += 1
 
-                # ✅ ROUTING-AWARE: SP3 ≤ SP2 or SP1 (depending on routing)
+                # ✅ VARIANT-LEVEL: SP3 ≤ SP2 or SP1 (internal seriality)
                 if part_params.get('has_sp3', True):
                     if part_params.get('has_sp2', True):
-                        # Part uses SP2: SP3 ≤ SP2
                         self.model += (
                             pulp.lpSum(self.x_sp3[(v, t)] for t in self.weeks if t <= w)
                             <= pulp.lpSum(self.x_sp2[(v, t)] for t in self.weeks if t <= w),
                             f"Cum_SP2_SP3_{v}_W{w}"
                         )
                     else:
-                        # Part skips SP2: SP3 ≤ SP1 directly
                         self.model += (
                             pulp.lpSum(self.x_sp3[(v, t)] for t in self.weeks if t <= w)
                             <= pulp.lpSum(self.x_sp1[(v, t)] for t in self.weeks if t <= w),
                             f"Cum_SP1_SP3_{v}_W{w}"
                         )
                     cnt += 1
-
-                # ✅ ROUTING-AWARE: Delivery ≤ FG+SP WIP consumed + last painting stage
-                # Determine which painting stage feeds into delivery
-                if part_params.get('has_sp3', True):
-                    paint_source = self.x_sp3
-                    paint_label = "SP3"
-                elif part_params.get('has_sp2', True):
-                    paint_source = self.x_sp2
-                    paint_label = "SP2"
-                else:
-                    paint_source = self.x_sp1
-                    paint_label = "SP1"
-
-                self.model += (
-                    pulp.lpSum(self.x_delivery[(v, t)] for t in self.weeks if t <= w)
-                    <= pulp.lpSum(self.wip_consumed_sp[(part, t)] for t in self.weeks if t <= w) +
-                       (wip['FG'] + pulp.lpSum(paint_source[(v, t)] for t in self.weeks if t <= w)),
-                    f"Cum_{paint_label}_Deliv_{v}_W{w}"
-                )
-                cnt += 1
         
         # Print summary of cooling/shakeout times
         cooling_times = {}
@@ -1575,20 +1644,24 @@ class ComprehensiveOptimizationModel:
             part, _ = self.part_week_mapping[v]
             if part not in self.params:
                 continue
-            
+
             L = max(self.config.MIN_LEAD_TIME_WEEKS, int(self.params[part]['lead_time_weeks']))
-            wip = self.wip_init.get(part, {'FG':0,'SP':0})
-            
+            wip = self.wip_init.get(part, {'FG':0,'SP':0,'MC':0,'GR':0,'CS':0})
+
+            # Include ALL WIP stages - flow constraints handle processing time
+            total_wip = (wip.get('FG',0) + wip.get('SP',0) +
+                        wip.get('MC',0) + wip.get('GR',0) + wip.get('CS',0))
+
             for w in self.weeks:
                 wL = max(0, w - L)
                 self.model += (
                     pulp.lpSum(self.x_delivery[(v, t)] for t in self.weeks if t <= w)
-                    <= wip.get('FG',0) + wip.get('SP',0) + 
+                    <= total_wip +
                        pulp.lpSum(self.x_casting[(v, t)] for t in self.weeks if 1 <= t <= wL),
                     f"LeadTime_{v}_W{w}"
                 )
                 cnt += 1
-        
+
         print(f"  ✓ Added {cnt:,} lead-time constraints")
     
     def _build_resource_constraints(self):
@@ -2455,6 +2528,29 @@ class ShipmentFulfillmentAnalyzer:
             for variant, meta_list in orders_by_variant.items()
         }
 
+        # Calculate total available per part (optimizer deliveries + FG/SP WIP)
+        part_total_available = {}
+        part_total_ordered = {}
+        for meta in orders_meta:
+            part = meta['part']
+            part_total_ordered[part] = part_total_ordered.get(part, 0) + meta['ordered_qty']
+
+        for part in part_total_ordered:
+            # Sum optimizer deliveries for all variants of this part
+            optimizer_delivered = 0
+            for v, (p, _) in self.part_week_mapping.items():
+                if p == part and v in delivery_by_variant:
+                    optimizer_delivered += delivery_by_variant[v]['delivered']
+
+            # Add FG and SP WIP
+            wip = self.wip_by_part.get(part, {})
+            fg_wip = wip.get('FG', 0)
+            sp_wip = wip.get('SP', 0)
+
+            total_available = optimizer_delivered + fg_wip + sp_wip
+            # Cap at ordered quantity
+            part_total_available[part] = min(total_available, part_total_ordered[part])
+
         for meta in orders_meta:
             part = meta['part']
             ordered_qty = meta['ordered_qty']
@@ -2462,14 +2558,25 @@ class ShipmentFulfillmentAnalyzer:
             committed_date = meta['committed_date']
             variant = meta['variant']
 
-            variant_info = delivery_by_variant.get(variant)
-            total_variant_orders = variant_order_totals.get(variant, 0)
+            # Allocate proportionally from part's total available
+            total_ordered_for_part = part_total_ordered.get(part, 0)
+            total_available_for_part = part_total_available.get(part, 0)
 
-            if variant_info and total_variant_orders > 0:
-                delivered_qty = variant_info['delivered'] * (ordered_qty / total_variant_orders)
+            if total_ordered_for_part > 0 and total_available_for_part > 0:
+                # Proportional allocation
+                delivered_qty = total_available_for_part * (ordered_qty / total_ordered_for_part)
+                delivered_qty = min(delivered_qty, ordered_qty)  # Cap at ordered
                 unmet_qty = max(0.0, ordered_qty - delivered_qty)
                 fulfillment_pct = (delivered_qty / ordered_qty * 100) if ordered_qty > 0 else 0
-                actual_week = variant_info['actual_week']
+
+                # Determine actual delivery week
+                variant_info = delivery_by_variant.get(variant)
+                if variant_info and variant_info['actual_week']:
+                    actual_week = variant_info['actual_week']
+                else:
+                    # Fulfilled from WIP, use committed week
+                    actual_week = committed_week
+
                 if delivered_qty < 0.01:
                     status = 'Not Fulfilled'
                 elif unmet_qty > 0.01:
@@ -2481,25 +2588,11 @@ class ShipmentFulfillmentAnalyzer:
                 else:
                     status = 'Fulfilled'
             else:
-                wip = self.model.wip_init.get(part, {'FG': 0, 'SP': 0, 'MC': 0, 'GR': 0, 'CS': 0})
-                available_wip = wip.get('FG', 0) + wip.get('SP', 0)
-                actual_week = committed_week if available_wip > 0 else None
-
-                if available_wip >= ordered_qty:
-                    delivered_qty = ordered_qty
-                    unmet_qty = 0
-                    fulfillment_pct = 100.0
-                    status = 'Fulfilled from WIP'
-                elif available_wip > 0:
-                    delivered_qty = available_wip
-                    unmet_qty = ordered_qty - available_wip
-                    fulfillment_pct = (delivered_qty / ordered_qty * 100) if ordered_qty > 0 else 0
-                    status = 'Partial from WIP'
-                else:
-                    delivered_qty = 0
-                    unmet_qty = ordered_qty
-                    fulfillment_pct = 0
-                    status = 'Not Planned'
+                delivered_qty = 0
+                unmet_qty = ordered_qty
+                fulfillment_pct = 0
+                actual_week = None
+                status = 'Not Planned'
 
             if actual_week:
                 actual_date = self.config.CURRENT_DATE + timedelta(weeks=actual_week-1)
@@ -2743,11 +2836,24 @@ class ShipmentFulfillmentAnalyzer:
         for part, ordered in part_data.items():
             variants = [v for v, (p, _) in self.part_week_mapping.items() if p == part]
 
-            delivered = 0
+            # Count optimizer deliveries
+            optimizer_delivered = 0
             for v in variants:
                 for w in self.weeks:
                     if (v, w) in self.model.x_delivery:
-                        delivered += float(pulp.value(self.model.x_delivery[(v, w)]) or 0)
+                        optimizer_delivered += float(pulp.value(self.model.x_delivery[(v, w)]) or 0)
+
+            # Add FG and SP WIP that directly fulfills orders (not through optimizer)
+            wip = self.wip_by_part.get(part, {})
+            fg_wip = wip.get('FG', 0)
+            sp_wip = wip.get('SP', 0)
+
+            # FG and SP WIP fulfills orders directly (up to ordered amount)
+            wip_fulfilled = min(fg_wip + sp_wip, ordered)
+            delivered = optimizer_delivered + wip_fulfilled
+
+            # Cap delivered at ordered (can't deliver more than ordered)
+            delivered = min(delivered, ordered)
 
             unmet = max(0, ordered - delivered)
             fulfillment = (delivered / ordered * 100) if ordered > 0 else 0
