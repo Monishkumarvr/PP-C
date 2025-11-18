@@ -2741,11 +2741,24 @@ class ShipmentFulfillmentAnalyzer:
         for part, ordered in part_data.items():
             variants = [v for v, (p, _) in self.part_week_mapping.items() if p == part]
 
-            delivered = 0
+            # Count optimizer deliveries
+            optimizer_delivered = 0
             for v in variants:
                 for w in self.weeks:
                     if (v, w) in self.model.x_delivery:
-                        delivered += float(pulp.value(self.model.x_delivery[(v, w)]) or 0)
+                        optimizer_delivered += float(pulp.value(self.model.x_delivery[(v, w)]) or 0)
+
+            # Add FG and SP WIP that directly fulfills orders (not through optimizer)
+            wip = self.wip_by_part.get(part, {})
+            fg_wip = wip.get('FG', 0)
+            sp_wip = wip.get('SP', 0)
+
+            # FG and SP WIP fulfills orders directly (up to ordered amount)
+            wip_fulfilled = min(fg_wip + sp_wip, ordered)
+            delivered = optimizer_delivered + wip_fulfilled
+
+            # Cap delivered at ordered (can't deliver more than ordered)
+            delivered = min(delivered, ordered)
 
             unmet = max(0, ordered - delivered)
             fulfillment = (delivered / ordered * 100) if ordered > 0 else 0
