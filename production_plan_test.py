@@ -902,26 +902,23 @@ class ComprehensiveParameterBuilder:
         return weeks
 
     def _calculate_lead_time(self, part_params):
-        """Flow-based lead time."""
-        stages = 0
-        if part_params['casting_cycle'] > 0:
-            stages += 1
-        if part_params['grind_cycle'] > 0:
-            stages += 1
-        if any(c > 0 for c in part_params['mach_cycles']):
-            stages += 1
-        if any(c > 0 for c in part_params['paint_cycles']):
-            stages += 1
+        """Flow-based lead time based on actual processing delays, not stage count.
 
-        # Include part-specific cooling/shakeout time
+        The previous formula (stages + lags) incorrectly assumed 1 week per stage.
+        In reality, multiple stages can happen within the same week - only the
+        cooling/shakeout time creates a mandatory delay between casting and grinding.
+        """
+        # Include part-specific cooling/shakeout time (the main delay)
         cooling_shakeout_weeks = self._calculate_cooling_shakeout_weeks(part_params)
 
-        lags = (cooling_shakeout_weeks +
-                self.config.GRINDING_LAG_WEEKS +
+        # Other inter-stage lags (typically 0)
+        lags = (self.config.GRINDING_LAG_WEEKS +
                 self.config.MACHINING_LAG_WEEKS +
                 self.config.PAINTING_LAG_WEEKS)
 
-        return max(self.config.MIN_LEAD_TIME_WEEKS, stages + lags)
+        # Lead time = 1 base week for production + cooling/shakeout + any other lags
+        # This allows casting in week w to be delivered in week w+1+cooling
+        return max(self.config.MIN_LEAD_TIME_WEEKS, 1 + cooling_shakeout_weeks + lags)
     
     def _safe_float(self, value):
         try:
@@ -1610,20 +1607,24 @@ class ComprehensiveOptimizationModel:
             part, _ = self.part_week_mapping[v]
             if part not in self.params:
                 continue
-            
+
             L = max(self.config.MIN_LEAD_TIME_WEEKS, int(self.params[part]['lead_time_weeks']))
-            wip = self.wip_init.get(part, {'FG':0,'SP':0})
-            
+            wip = self.wip_init.get(part, {'FG':0,'SP':0,'MC':0,'GR':0,'CS':0})
+
+            # Include ALL WIP stages - flow constraints handle processing time
+            total_wip = (wip.get('FG',0) + wip.get('SP',0) +
+                        wip.get('MC',0) + wip.get('GR',0) + wip.get('CS',0))
+
             for w in self.weeks:
                 wL = max(0, w - L)
                 self.model += (
                     pulp.lpSum(self.x_delivery[(v, t)] for t in self.weeks if t <= w)
-                    <= wip.get('FG',0) + wip.get('SP',0) + 
+                    <= total_wip +
                        pulp.lpSum(self.x_casting[(v, t)] for t in self.weeks if 1 <= t <= wL),
                     f"LeadTime_{v}_W{w}"
                 )
                 cnt += 1
-        
+
         print(f"  ✓ Added {cnt:,} lead-time constraints")
     
     def _build_resource_constraints(self):
