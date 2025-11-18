@@ -814,7 +814,7 @@ class WIPDemandCalculator:
         if pd.isna(delivery_date):
             return self.config.PLANNING_WEEKS // 2
         days_diff = (delivery_date - self.config.CURRENT_DATE).days
-        week_num = max(1, math.ceil(days_diff / 7))  # No cap! Allow all weeks
+        week_num = max(1, (days_diff // 7) + 1)  # Week 1 = days 0-6, Week 2 = days 7-13, etc.
         return week_num
 
 
