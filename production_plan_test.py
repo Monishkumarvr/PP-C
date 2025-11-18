@@ -64,7 +64,7 @@ class ProductionConfig:
         self.PAINTING_LAG_WEEKS = 0
 
         # Minimum lead time
-        self.MIN_LEAD_TIME_WEEKS = 0  # Removed minimum to maximize production flexibility
+        self.MIN_LEAD_TIME_WEEKS = 1  # Minimum lead time for production flexibility
         self.AVG_LEAD_TIME_WEEKS = 4  # Average lead time for forecasting beyond-horizon orders
 
         # Delivery flexibility
@@ -902,13 +902,16 @@ class ComprehensiveParameterBuilder:
         return weeks
 
     def _calculate_lead_time(self, part_params):
-        """Flow-based lead time based on actual processing delays, not stage count.
+        """Flow-based lead time accounting for production pipeline.
 
-        The previous formula (stages + lags) incorrectly assumed 1 week per stage.
-        In reality, multiple stages can happen within the same week - only the
-        cooling/shakeout time creates a mandatory delay between casting and grinding.
+        Lead time must account for:
+        1. Cooling/shakeout delay after casting
+        2. Buffer for parts to flow through production stages
+
+        Formula: cooling_weeks + 2 (for grinding → machining → painting flow)
+        This balances early production with feasibility for early-week orders.
         """
-        # Include part-specific cooling/shakeout time (the main delay)
+        # Include part-specific cooling/shakeout time
         cooling_shakeout_weeks = self._calculate_cooling_shakeout_weeks(part_params)
 
         # Other inter-stage lags (typically 0)
@@ -916,9 +919,9 @@ class ComprehensiveParameterBuilder:
                 self.config.MACHINING_LAG_WEEKS +
                 self.config.PAINTING_LAG_WEEKS)
 
-        # Lead time = 1 base week for production + cooling/shakeout + any other lags
-        # This allows casting in week w to be delivered in week w+1+cooling
-        return max(self.config.MIN_LEAD_TIME_WEEKS, 1 + cooling_shakeout_weeks + lags)
+        # Lead time = cooling + 2 weeks buffer for production flow
+        # This allows: cast(W) → grind(W+1) → machine(W+2) → paint(W+2) → deliver(W+3)
+        return max(self.config.MIN_LEAD_TIME_WEEKS, cooling_shakeout_weeks + 2 + lags)
     
     def _safe_float(self, value):
         try:
