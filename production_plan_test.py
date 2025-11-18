@@ -1926,48 +1926,62 @@ class ComprehensiveOptimizationModel:
                     )
     
     def _add_painting_constraints_by_stage(self):
-        """✅ FIXED: Painting constraints BY STAGE using tonnage limits."""
+        """✅ Painting constraints per resource (cycle time only, dry time is passive)."""
         print("  ✅ Adding painting constraints BY STAGE...")
 
-        PAINT_TOP_COAT_TON_PER_WEEK = 70 * 6
-        PAINT_PRIMER_TON_PER_WEEK = 100 * 6
+        stage_defs = [
+            ('SP1', 0, self.x_sp1, 'Painting Stage 1'),
+            ('SP2', 1, self.x_sp2, 'Painting Stage 2'),
+            ('SP3', 2, self.x_sp3, 'Painting Stage 3')
+        ]
 
-        # Get top coat and primer variants
-        top_coat_variants = [v for v in self.split_demand
-                            if self.part_week_mapping[v][0] in self.params
-                            and self.params[self.part_week_mapping[v][0]]['is_top_coat']]
-        primer_variants = [v for v in self.split_demand
-                          if self.part_week_mapping[v][0] in self.params
-                          and not self.params[self.part_week_mapping[v][0]]['is_top_coat']]
+        for stage_label, idx, stage_vars, op_name in stage_defs:
+            resource_entries = defaultdict(list)
 
-        for w in self.weeks:
-            # Top coat capacity (stage 3 - final coat)
-            top_terms = []
-            for v in top_coat_variants:
+            for v in self.split_demand:
                 part, _ = self.part_week_mapping[v]
-                uw = self.params[part]['unit_weight']
-                if uw > 0:
-                    top_terms.append(self.x_sp3[(v, w)] * (uw / 1000.0))
+                if part not in self.params:
+                    continue
 
-            if top_terms:
-                self.model += (
-                    pulp.lpSum(top_terms) <= PAINT_TOP_COAT_TON_PER_WEEK * (1 + self.config.OVERTIME_ALLOWANCE),
-                    f"PaintTop_W{w}"
-                )
+                params = self.params[part]
+                resources = params.get('paint_resources', [])
+                cycles = params.get('paint_cycles', [])
+                batches = params.get('paint_batches', [])
+                # Note: dry_times NOT used for capacity - drying is passive
 
-            # Primer capacity (stage 3 - final coat)
-            prim_terms = []
-            for v in primer_variants:
-                part, _ = self.part_week_mapping[v]
-                uw = self.params[part]['unit_weight']
-                if uw > 0:
-                    prim_terms.append(self.x_sp3[(v, w)] * (uw / 1000.0))
+                if idx >= len(resources):
+                    continue
 
-            if prim_terms:
-                self.model += (
-                    pulp.lpSum(prim_terms) <= PAINT_PRIMER_TON_PER_WEEK * (1 + self.config.OVERTIME_ALLOWANCE),
-                    f"PaintPrim_W{w}"
-                )
+                resource_code = (resources[idx] or '').strip()
+                cycle = cycles[idx] if idx < len(cycles) else 0
+                batch = batches[idx] if idx < len(batches) else 1
+
+                batch = max(1, batch or 1)
+                # Only cycle time consumes machine capacity (dry time is passive)
+                hours_per_unit = 0.0
+                if cycle and cycle > 0:
+                    hours_per_unit = (cycle / 60.0) / batch
+
+                if hours_per_unit <= 0:
+                    continue
+
+                if resource_code and resource_code.lower() != 'nan':
+                    cap = self.machine_manager.get_machine_capacity(resource_code)
+                    if cap > 0:
+                        resource_entries[resource_code].append((v, hours_per_unit))
+
+            # Add per-resource constraints
+            for res_code, plist in resource_entries.items():
+                cap = self.machine_manager.get_machine_capacity(res_code)
+                if cap <= 0:
+                    continue
+                for w in self.weeks:
+                    terms = [stage_vars[(v, w)] * hours for (v, hours) in plist]
+                    if terms:
+                        self.model += (
+                            pulp.lpSum(terms) <= cap * (1 + self.config.OVERTIME_ALLOWANCE),
+                            f"{stage_label}_Cap_{res_code}_W{w}"
+                        )
 
     def _add_box_constraints(self):
         box_variants = defaultdict(list)
