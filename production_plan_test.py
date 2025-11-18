@@ -83,7 +83,7 @@ class ProductionConfig:
         
         # Penalties
         self.UNMET_DEMAND_PENALTY = 200000  # Cost of not fulfilling orders (increased 5x to force fulfillment)
-        self.LATENESS_PENALTY = 50000  # Cost per week late (increased 2x to prioritize on-time delivery)
+        self.LATENESS_PENALTY = 150000  # Cost per week late (increased 3x from 50k to prioritize on-time delivery)
         self.INVENTORY_HOLDING_COST = 1  # Cost per unit per week for holding inventory (reduced 10x to encourage early production)
         self.MAX_EARLY_WEEKS = 8  # Maximum weeks to produce before delivery date (for inventory holding)
         self.STARTUP_BONUS = -50
