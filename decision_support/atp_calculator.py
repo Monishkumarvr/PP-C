@@ -1,0 +1,361 @@
+"""
+Available-to-Promise (ATP) Calculator
+=====================================
+Calculates available capacity to promise new orders.
+"""
+
+import pandas as pd
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+from datetime import datetime, timedelta
+
+
+@dataclass
+class ATPResult:
+    """Result of ATP calculation for a potential order."""
+    part_code: str
+    requested_qty: int
+    requested_week: int
+    is_feasible: bool
+    earliest_delivery_week: int
+    capacity_gaps: Dict[str, float]  # resource -> gap in hours/units
+    limiting_resource: str
+    confidence: str  # High, Medium, Low
+    notes: List[str]
+
+
+@dataclass
+class CapacitySlot:
+    """Available capacity for a resource in a week."""
+    resource: str
+    week: int
+    total_capacity: float
+    used_capacity: float
+    available_capacity: float
+    unit: str
+
+
+class ATPCalculator:
+    """
+    Calculates available capacity to promise new orders.
+
+    Usage:
+        calculator = ATPCalculator(comprehensive_output_path)
+        result = calculator.check_order('PART-001', qty=100, requested_week=5)
+        capacity_df = calculator.get_available_capacity()
+    """
+
+    def __init__(self, comprehensive_output_path: str):
+        """
+        Args:
+            comprehensive_output_path: Path to production_plan_COMPREHENSIVE_test.xlsx
+        """
+        self.output_path = comprehensive_output_path
+        self.data = {}
+        self._load_data()
+        self._calculate_available_capacity()
+
+    def _load_data(self):
+        """Load relevant sheets from comprehensive output."""
+        print("  📊 Loading optimizer results for ATP calculation...")
+
+        try:
+            xl_file = pd.ExcelFile(self.output_path)
+
+            sheets_to_load = [
+                'Weekly_Summary',
+                'Part_Parameters',
+                'Machine_Utilization',
+                'Box_Utilization'
+            ]
+
+            for sheet in sheets_to_load:
+                if sheet in xl_file.sheet_names:
+                    self.data[sheet] = pd.read_excel(xl_file, sheet_name=sheet)
+
+            print(f"    ✓ Loaded {len(self.data)} sheets")
+
+        except Exception as e:
+            print(f"    ❌ Error loading data: {e}")
+            raise
+
+    def _calculate_available_capacity(self):
+        """Calculate available capacity by resource and week."""
+        self.capacity_slots = []
+        weekly_summary = self.data.get('Weekly_Summary', pd.DataFrame())
+
+        if weekly_summary.empty:
+            return
+
+        # Define resources and their capacity columns
+        resources = [
+            ('Big_Line', 'Big_Line_Hours', 'Big_Line_Capacity_Hours', 'hours'),
+            ('Small_Line', 'Small_Line_Hours', 'Small_Line_Capacity_Hours', 'hours'),
+            ('Casting', 'Casting_Tons', None, 'tons'),
+            ('Grinding', 'Grinding_Units', None, 'units'),
+            ('MC1', 'MC1_Units', None, 'units'),
+            ('MC2', 'MC2_Units', None, 'units'),
+            ('MC3', 'MC3_Units', None, 'units'),
+            ('SP1', 'SP1_Units', None, 'units'),
+            ('SP2', 'SP2_Units', None, 'units'),
+            ('SP3', 'SP3_Units', None, 'units'),
+        ]
+
+        for _, row in weekly_summary.iterrows():
+            week = int(row.get('Week', 0))
+            if week == 0:
+                continue
+
+            for resource, used_col, cap_col, unit in resources:
+                used = float(row.get(used_col, 0) or 0)
+
+                # Get capacity - try explicit column first, then estimate from utilization
+                if cap_col and cap_col in row:
+                    capacity = float(row.get(cap_col, 0) or 0)
+                else:
+                    # Estimate from utilization if available
+                    util_col = f'{resource}_Util_%'
+                    if util_col in row:
+                        util = float(row.get(util_col, 0) or 0)
+                        capacity = used / (util / 100) if util > 0 else used * 1.5
+                    else:
+                        # Default estimate
+                        capacity = used * 1.2 if used > 0 else 1000
+
+                available = max(0, capacity - used)
+
+                self.capacity_slots.append(CapacitySlot(
+                    resource=resource,
+                    week=week,
+                    total_capacity=round(capacity, 1),
+                    used_capacity=round(used, 1),
+                    available_capacity=round(available, 1),
+                    unit=unit
+                ))
+
+    def check_order(self, part_code: str, qty: int, requested_week: int) -> ATPResult:
+        """
+        Check if a new order can be fulfilled.
+
+        Args:
+            part_code: Part/material code
+            qty: Requested quantity
+            requested_week: Requested delivery week
+
+        Returns:
+            ATPResult with feasibility assessment
+        """
+        print(f"  🔍 Checking ATP for {part_code}: {qty} units by W{requested_week}...")
+
+        # Get part parameters
+        part_params = self._get_part_parameters(part_code)
+
+        if not part_params:
+            return ATPResult(
+                part_code=part_code,
+                requested_qty=qty,
+                requested_week=requested_week,
+                is_feasible=False,
+                earliest_delivery_week=0,
+                capacity_gaps={},
+                limiting_resource='Unknown',
+                confidence='Low',
+                notes=[f'Part {part_code} not found in Part_Parameters']
+            )
+
+        # Calculate required capacity for each stage
+        required_capacity = self._calculate_required_capacity(part_params, qty)
+
+        # Check availability for requested week and find earliest possible
+        capacity_gaps = {}
+        limiting_resource = None
+        max_gap = 0
+
+        # Check if requested week is feasible
+        is_feasible = True
+        notes = []
+
+        for resource, required in required_capacity.items():
+            available = self._get_available_capacity(resource, requested_week)
+
+            if available < required:
+                gap = required - available
+                capacity_gaps[resource] = gap
+                is_feasible = False
+
+                if gap > max_gap:
+                    max_gap = gap
+                    limiting_resource = resource
+
+        # Find earliest delivery week
+        earliest_week = self._find_earliest_week(required_capacity, requested_week)
+
+        # Determine confidence
+        if is_feasible:
+            confidence = 'High'
+            notes.append(f'✓ Order can be fulfilled by W{requested_week}')
+        elif earliest_week <= requested_week + 2:
+            confidence = 'Medium'
+            notes.append(f'⚠ Partial capacity available, earliest: W{earliest_week}')
+        else:
+            confidence = 'Low'
+            notes.append(f'❌ Significant capacity constraints, earliest: W{earliest_week}')
+
+        if limiting_resource:
+            notes.append(f'Limiting resource: {limiting_resource}')
+
+        return ATPResult(
+            part_code=part_code,
+            requested_qty=qty,
+            requested_week=requested_week,
+            is_feasible=is_feasible,
+            earliest_delivery_week=earliest_week,
+            capacity_gaps=capacity_gaps,
+            limiting_resource=limiting_resource or 'None',
+            confidence=confidence,
+            notes=notes
+        )
+
+    def _get_part_parameters(self, part_code: str) -> Optional[Dict]:
+        """Get production parameters for a part."""
+        params_df = self.data.get('Part_Parameters', pd.DataFrame())
+
+        if params_df.empty:
+            return None
+
+        # Find part in parameters
+        part_col = None
+        for col in ['Part', 'Material_Code', 'FG_Code']:
+            if col in params_df.columns:
+                part_col = col
+                break
+
+        if not part_col:
+            return None
+
+        part_row = params_df[params_df[part_col] == part_code]
+
+        if part_row.empty:
+            return None
+
+        return part_row.iloc[0].to_dict()
+
+    def _calculate_required_capacity(self, part_params: Dict, qty: int) -> Dict[str, float]:
+        """Calculate required capacity for each resource to produce qty units."""
+        required = {}
+
+        # Unit weight for casting
+        unit_weight = float(part_params.get('Unit_Weight_kg', 0) or 0)
+        required['Casting'] = (unit_weight * qty) / 1000  # tons
+
+        # Moulding line
+        moulding_line = str(part_params.get('Moulding_Line', '')).upper()
+        casting_cycle = float(part_params.get('Casting_Cycle_time_min', 0) or 0)
+
+        if 'BIG' in moulding_line:
+            required['Big_Line'] = (casting_cycle * qty) / 60  # hours
+        else:
+            required['Small_Line'] = (casting_cycle * qty) / 60  # hours
+
+        # Grinding
+        required['Grinding'] = qty
+
+        # Machining (simplified - same units through all stages)
+        required['MC1'] = qty
+        required['MC2'] = qty
+        required['MC3'] = qty
+
+        # Painting
+        required['SP1'] = qty
+        required['SP2'] = qty
+        required['SP3'] = qty
+
+        return required
+
+    def _get_available_capacity(self, resource: str, week: int) -> float:
+        """Get available capacity for a resource in a specific week."""
+        for slot in self.capacity_slots:
+            if slot.resource == resource and slot.week == week:
+                return slot.available_capacity
+        return 0
+
+    def _find_earliest_week(self, required_capacity: Dict[str, float],
+                           start_week: int) -> int:
+        """Find the earliest week when all capacity is available."""
+        max_week = max(slot.week for slot in self.capacity_slots) if self.capacity_slots else start_week
+
+        for week in range(start_week, max_week + 1):
+            all_available = True
+
+            for resource, required in required_capacity.items():
+                available = self._get_available_capacity(resource, week)
+                if available < required:
+                    all_available = False
+                    break
+
+            if all_available:
+                return week
+
+        return max_week + 1  # Beyond planning horizon
+
+    def get_available_capacity(self) -> pd.DataFrame:
+        """Get available capacity matrix as DataFrame."""
+        if not self.capacity_slots:
+            return pd.DataFrame({'Note': ['No capacity data available']})
+
+        records = []
+        for slot in self.capacity_slots:
+            records.append({
+                'Week': f'W{slot.week}',
+                'Resource': slot.resource,
+                'Total_Capacity': slot.total_capacity,
+                'Used_Capacity': slot.used_capacity,
+                'Available_Capacity': slot.available_capacity,
+                'Utilization_%': round(
+                    (slot.used_capacity / slot.total_capacity * 100)
+                    if slot.total_capacity > 0 else 0, 1
+                ),
+                'Unit': slot.unit
+            })
+
+        df = pd.DataFrame(records)
+
+        # Pivot for easier viewing
+        if not df.empty:
+            df = df.sort_values(['Resource', 'Week'])
+
+        return df
+
+    def get_capacity_forecast(self) -> pd.DataFrame:
+        """Get capacity forecast summary by week."""
+        if not self.capacity_slots:
+            return pd.DataFrame()
+
+        # Group by week and summarize
+        records = []
+        weeks = sorted(set(slot.week for slot in self.capacity_slots))
+
+        for week in weeks:
+            week_slots = [s for s in self.capacity_slots if s.week == week]
+
+            total_util = sum(
+                s.used_capacity / s.total_capacity * 100
+                for s in week_slots if s.total_capacity > 0
+            )
+            avg_util = total_util / len(week_slots) if week_slots else 0
+
+            constrained = sum(
+                1 for s in week_slots
+                if s.total_capacity > 0 and
+                (s.used_capacity / s.total_capacity * 100) >= 85
+            )
+
+            records.append({
+                'Week': f'W{week}',
+                'Avg_Utilization_%': round(avg_util, 1),
+                'Constrained_Resources': constrained,
+                'Status': 'Critical' if constrained >= 3 else
+                         'Tight' if constrained >= 1 else 'OK'
+            })
+
+        return pd.DataFrame(records)
