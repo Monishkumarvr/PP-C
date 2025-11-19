@@ -863,10 +863,12 @@ def main():
             st.markdown("Simulate different scenarios to understand capacity constraints and plan improvements.")
 
             # Create sub-tabs for different analyses
-            whatif_tab1, whatif_tab2, whatif_tab3 = st.tabs([
+            whatif_tab1, whatif_tab2, whatif_tab3, whatif_tab4, whatif_tab5 = st.tabs([
                 "🔧 Capacity Scenarios",
                 "📊 Demand Scaling",
-                "⚠️ Bottleneck Analysis"
+                "⚠️ Bottleneck Analysis",
+                "📦 New Order (ATP)",
+                "🚨 Rush Orders"
             ])
 
             with whatif_tab1:
@@ -1148,6 +1150,230 @@ def main():
                     )
 
                     st.plotly_chart(fig, use_container_width=True)
+
+            with whatif_tab4:
+                st.subheader("New Order Feasibility (ATP)")
+                st.markdown("Check if a new order can be fulfilled given current capacity.")
+
+                # Get available parts from the data
+                part_master = all_results['data']['part_master']
+                available_parts = sorted(part_master['FG Code'].dropna().unique().tolist())
+
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    atp_part = st.selectbox(
+                        "Part Code",
+                        options=available_parts,
+                        help="Select the part for the new order"
+                    )
+
+                with col2:
+                    atp_qty = st.number_input(
+                        "Quantity",
+                        min_value=1,
+                        max_value=10000,
+                        value=100,
+                        step=10,
+                        help="Order quantity"
+                    )
+
+                with col3:
+                    atp_week = st.number_input(
+                        "Delivery Week",
+                        min_value=1,
+                        max_value=20,
+                        value=8,
+                        help="Requested delivery week"
+                    )
+
+                if st.button("Check Feasibility", type="primary"):
+                    # Get current utilization for the requested week
+                    weekly_summary = results['weekly_summary']
+                    week_data = weekly_summary[weekly_summary['Week'] == atp_week]
+
+                    if len(week_data) > 0:
+                        week_row = week_data.iloc[0]
+
+                        # Get part parameters
+                        part_info = part_master[part_master['FG Code'] == atp_part]
+
+                        if len(part_info) > 0:
+                            part_row = part_info.iloc[0]
+                            unit_weight = float(part_row.get('Standard unit wt.', 1) or 1)
+                            additional_tons = (atp_qty * unit_weight) / 1000
+
+                            # Check casting capacity
+                            current_util = week_row.get('Big_Line_Util_%', 0)
+
+                            # Estimate additional utilization (simplified)
+                            # Assume roughly linear relationship
+                            current_tons = week_row.get('Casting_Tons', 0)
+                            if current_tons > 0:
+                                util_per_ton = current_util / current_tons
+                                additional_util = additional_tons * util_per_ton
+                                new_util = current_util + additional_util
+                            else:
+                                new_util = current_util + 5  # Default estimate
+
+                            # Determine feasibility
+                            if new_util <= 90:
+                                feasibility = "Feasible"
+                                color = "success"
+                                message = f"Order can be fulfilled in Week {atp_week}."
+                            elif new_util <= 100:
+                                feasibility = "Tight"
+                                color = "warning"
+                                message = f"Order can be fulfilled but capacity will be tight ({new_util:.1f}%)."
+                            else:
+                                feasibility = "Not Feasible"
+                                color = "error"
+                                message = f"Week {atp_week} exceeds capacity ({new_util:.1f}%). Consider alternative weeks."
+
+                            # Display result
+                            st.markdown("---")
+                            st.subheader("ATP Result")
+
+                            col1, col2, col3, col4 = st.columns(4)
+                            with col1:
+                                st.metric("Feasibility", feasibility)
+                            with col2:
+                                st.metric("Additional Load", f"{additional_tons:.2f} tons")
+                            with col3:
+                                st.metric("Current Util", f"{current_util:.1f}%")
+                            with col4:
+                                st.metric("Projected Util", f"{new_util:.1f}%")
+
+                            if color == "success":
+                                st.success(message)
+                            elif color == "warning":
+                                st.warning(message)
+                            else:
+                                st.error(message)
+
+                                # Suggest alternative weeks
+                                st.markdown("**Alternative Weeks with Capacity:**")
+                                alternatives = weekly_summary[weekly_summary['Big_Line_Util_%'] < 80]
+                                if len(alternatives) > 0:
+                                    alt_weeks = alternatives['Week'].tolist()[:5]
+                                    st.write(f"Weeks with <80% utilization: {', '.join(map(str, alt_weeks))}")
+                                else:
+                                    st.write("No weeks with significant spare capacity found.")
+                        else:
+                            st.error(f"Part {atp_part} not found in Part Master.")
+                    else:
+                        st.warning(f"Week {atp_week} is outside the current planning horizon.")
+
+            with whatif_tab5:
+                st.subheader("Rush Order Analysis")
+                st.markdown("Analyze late or unfulfilled orders and see what's needed to expedite them.")
+
+                # Get orders that are late or unfulfilled
+                order_fulfillment = fulfillment_reports['order_fulfillment']
+                problem_orders = order_fulfillment[
+                    order_fulfillment['Delivery_Status'].isin(['Late', 'Not Fulfilled', 'Partial'])
+                ]
+
+                if len(problem_orders) > 0:
+                    # Create selection options
+                    order_options = []
+                    for _, row in problem_orders.iterrows():
+                        order_id = row.get('Sales_Order_No', 'Unknown')
+                        part = row.get('Part_Code', row.get('Material_Code', 'Unknown'))
+                        qty = row.get('Ordered_Qty', 0)
+                        status = row.get('Delivery_Status', 'Unknown')
+                        order_options.append(f"{order_id} - {part} ({qty} units) - {status}")
+
+                    selected_order = st.selectbox(
+                        "Select Order to Analyze",
+                        options=order_options
+                    )
+
+                    if selected_order:
+                        # Parse selected order
+                        order_id = selected_order.split(' - ')[0]
+                        order_row = problem_orders[
+                            problem_orders['Sales_Order_No'].astype(str) == order_id
+                        ]
+
+                        if len(order_row) > 0:
+                            order_data = order_row.iloc[0]
+
+                            st.markdown("---")
+                            st.subheader("Order Details")
+
+                            col1, col2, col3, col4 = st.columns(4)
+                            with col1:
+                                st.metric("Order", order_id)
+                            with col2:
+                                qty = order_data.get('Ordered_Qty', 0)
+                                delivered = order_data.get('Delivered_Qty', 0)
+                                st.metric("Quantity", f"{delivered}/{qty}")
+                            with col3:
+                                st.metric("Status", order_data.get('Delivery_Status', 'Unknown'))
+                            with col4:
+                                days_late = order_data.get('Days_Late', 0)
+                                st.metric("Days Late", int(days_late))
+
+                            # Analysis and recommendations
+                            st.subheader("Expedite Options")
+
+                            unmet = order_data.get('Unmet_Qty', qty - delivered)
+                            part_code = order_data.get('Part_Code', order_data.get('Material_Code', 'Unknown'))
+
+                            # Get part weight
+                            part_master = all_results['data']['part_master']
+                            part_info = part_master[part_master['FG Code'] == part_code]
+                            if len(part_info) > 0:
+                                unit_weight = float(part_info.iloc[0].get('Standard unit wt.', 1) or 1)
+                            else:
+                                unit_weight = 1
+
+                            additional_tons = (unmet * unit_weight) / 1000
+
+                            st.markdown(f"""
+                            **To fulfill remaining {int(unmet)} units ({additional_tons:.2f} tons):**
+
+                            1. **Overtime Option**
+                               - Add ~{max(4, int(additional_tons * 2))} overtime hours in the next week
+                               - Estimated cost: Higher labor costs
+
+                            2. **Outsourcing Option**
+                               - Outsource casting of {additional_tons:.2f} tons
+                               - Lead time: 1-2 weeks
+                               - Estimated cost: Premium pricing
+
+                            3. **Priority Rescheduling**
+                               - Reschedule lower-priority orders
+                               - Free up {additional_tons:.2f} tons capacity
+                               - Impact: Other orders delayed
+
+                            4. **Partial Shipment**
+                               - Ship available {int(delivered)} units now
+                               - Deliver remaining {int(unmet)} units in Week +1-2
+                               - Negotiate with customer
+                            """)
+
+                            # Show capacity in upcoming weeks
+                            st.subheader("Upcoming Capacity Availability")
+                            weekly_summary = results['weekly_summary']
+
+                            # Show next 4 weeks
+                            upcoming = weekly_summary.head(4)[['Week', 'Big_Line_Util_%', 'Casting_Tons']]
+                            upcoming['Available_Capacity_%'] = 100 - upcoming['Big_Line_Util_%']
+
+                            st.dataframe(upcoming, use_container_width=True)
+
+                else:
+                    st.success("No late or unfulfilled orders found! All orders are on track.")
+
+                    # Show orders at risk (near deadline)
+                    st.subheader("Orders to Monitor")
+                    on_time_orders = order_fulfillment[
+                        order_fulfillment['Delivery_Status'] == 'On-Time'
+                    ]
+                    if len(on_time_orders) > 0:
+                        st.info(f"All {len(on_time_orders)} orders are currently on-time. Continue monitoring daily production.")
 
         with tab6:
             st.header("Download Reports")
