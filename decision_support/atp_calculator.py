@@ -359,3 +359,153 @@ class ATPCalculator:
             })
 
         return pd.DataFrame(records)
+
+    def check_multiple_orders(self, potential_orders: List[Dict]) -> pd.DataFrame:
+        """
+        Check feasibility of multiple potential orders.
+
+        Args:
+            potential_orders: List of dicts with keys: part_code, qty, requested_week
+
+        Returns:
+            DataFrame with feasibility results for each order
+        """
+        results = []
+
+        for order in potential_orders:
+            part_code = order.get('part_code', '')
+            qty = int(order.get('qty', 0))
+            requested_week = int(order.get('requested_week', 1))
+
+            if not part_code or qty <= 0:
+                continue
+
+            result = self.check_order(part_code, qty, requested_week)
+
+            results.append({
+                'Part_Code': result.part_code,
+                'Requested_Qty': result.requested_qty,
+                'Requested_Week': f'W{result.requested_week}',
+                'Feasible': 'Yes' if result.is_feasible else 'No',
+                'Earliest_Delivery': f'W{result.earliest_delivery_week}',
+                'Delay_Weeks': max(0, result.earliest_delivery_week - result.requested_week),
+                'Limiting_Resource': result.limiting_resource,
+                'Confidence': result.confidence,
+                'Notes': '; '.join(result.notes)
+            })
+
+        if not results:
+            return pd.DataFrame({
+                'Note': ['No valid orders to check. Add orders with Part_Code, Qty, and Requested_Week.']
+            })
+
+        return pd.DataFrame(results)
+
+    def get_available_parts(self) -> List[str]:
+        """Get list of parts that can be produced (from Part_Parameters)."""
+        params_df = self.data.get('Part_Parameters', pd.DataFrame())
+
+        if params_df.empty:
+            return []
+
+        # Find part column
+        for col in ['Part', 'Material_Code', 'FG_Code']:
+            if col in params_df.columns:
+                return sorted(params_df[col].dropna().unique().tolist())
+
+        return []
+
+    def create_atp_template(self) -> pd.DataFrame:
+        """
+        Create an ATP input template with sample entries.
+
+        Users can modify this template to check their potential orders.
+        """
+        # Get available parts for reference
+        available_parts = self.get_available_parts()
+
+        # Get weeks with best capacity
+        forecast = self.get_capacity_forecast()
+        ok_weeks = []
+        if not forecast.empty and 'Status' in forecast.columns:
+            ok_weeks = forecast[forecast['Status'] == 'OK']['Week'].tolist()
+
+        # Create sample entries
+        sample_orders = []
+
+        # Add 3-5 sample entries using actual parts if available
+        sample_parts = available_parts[:5] if available_parts else ['PART-001', 'PART-002', 'PART-003']
+        sample_weeks = [5, 6, 7, 8, 9]
+
+        for i, part in enumerate(sample_parts):
+            week = sample_weeks[i % len(sample_weeks)]
+            sample_orders.append({
+                'Part_Code': part,
+                'Qty': (i + 1) * 50,
+                'Requested_Week': week
+            })
+
+        # Check these sample orders
+        results_df = self.check_multiple_orders(sample_orders)
+
+        return results_df
+
+    def get_best_weeks_for_capacity(self, num_weeks: int = 5) -> List[int]:
+        """Get the weeks with most available capacity."""
+        if not self.capacity_slots:
+            return list(range(1, num_weeks + 1))
+
+        # Calculate average utilization per week
+        week_util = {}
+        weeks = sorted(set(slot.week for slot in self.capacity_slots))
+
+        for week in weeks:
+            week_slots = [s for s in self.capacity_slots if s.week == week]
+            if week_slots:
+                total_util = sum(
+                    s.used_capacity / s.total_capacity * 100
+                    for s in week_slots if s.total_capacity > 0
+                )
+                avg_util = total_util / len(week_slots)
+                week_util[week] = avg_util
+
+        # Sort by utilization (lowest first = most capacity available)
+        sorted_weeks = sorted(week_util.keys(), key=lambda w: week_util[w])
+
+        return sorted_weeks[:num_weeks]
+
+    def get_capacity_summary_by_week(self) -> pd.DataFrame:
+        """
+        Get a pivoted capacity summary showing available capacity per resource per week.
+        Useful for quick visual assessment of where capacity exists.
+        """
+        if not self.capacity_slots:
+            return pd.DataFrame()
+
+        # Create pivot table
+        records = []
+        resources = sorted(set(slot.resource for slot in self.capacity_slots))
+        weeks = sorted(set(slot.week for slot in self.capacity_slots))
+
+        for resource in resources:
+            row = {'Resource': resource}
+            for week in weeks:
+                slot = next(
+                    (s for s in self.capacity_slots
+                     if s.resource == resource and s.week == week),
+                    None
+                )
+                if slot:
+                    # Show available capacity with utilization indicator
+                    util = (slot.used_capacity / slot.total_capacity * 100) if slot.total_capacity > 0 else 0
+                    if util >= 100:
+                        row[f'W{week}'] = f'{slot.available_capacity:.0f} (FULL)'
+                    elif util >= 85:
+                        row[f'W{week}'] = f'{slot.available_capacity:.0f} (TIGHT)'
+                    else:
+                        row[f'W{week}'] = f'{slot.available_capacity:.0f}'
+                else:
+                    row[f'W{week}'] = '-'
+            records.append(row)
+
+        return pd.DataFrame(records)

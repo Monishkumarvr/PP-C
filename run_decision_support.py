@@ -83,8 +83,12 @@ class DecisionSupportReportGenerator:
         # 4. Capacity Availability
         capacity_df = atp_calculator.get_available_capacity()
         capacity_forecast = atp_calculator.get_capacity_forecast()
+        capacity_summary = atp_calculator.get_capacity_summary_by_week()
 
-        # 5. Recommendations
+        # 5. ATP Template for New Orders
+        atp_template = atp_calculator.create_atp_template()
+
+        # 6. Recommendations
         recommendations_df = recommendations_engine.to_dataframe()
         action_plan = recommendations_engine.get_action_plan()
 
@@ -96,10 +100,11 @@ class DecisionSupportReportGenerator:
             '4_ORDER_RISK': risk_df,
             '5_RISK_BY_CUSTOMER': risk_by_customer,
             '6_RISK_BY_WEEK': risk_by_week,
-            '7_CAPACITY_AVAILABILITY': capacity_df,
-            '8_CAPACITY_FORECAST': capacity_forecast,
-            '9_RECOMMENDATIONS': recommendations_df,
-            '10_ACTION_PLAN': action_plan
+            '7_CAPACITY_FORECAST': capacity_forecast,
+            '8_CAPACITY_BY_RESOURCE': capacity_summary,
+            '9_ATP_NEW_ORDERS': atp_template,
+            '10_RECOMMENDATIONS': recommendations_df,
+            '11_ACTION_PLAN': action_plan
         }
 
         # Write to Excel
@@ -121,10 +126,16 @@ class DecisionSupportReportGenerator:
         print("\n📋 Report Contents:")
         print("   • Executive Summary - Key metrics and KPIs")
         print("   • Bottleneck Analysis - Capacity constraints")
-        print("   • Order Risk Dashboard - At-risk orders")
-        print("   • Capacity Availability - Available capacity by resource")
+        print("   • Order Risk Dashboard - At-risk orders by customer/week")
+        print("   • Capacity Forecast - Weekly capacity outlook")
+        print("   • Capacity by Resource - Available capacity matrix")
+        print("   • ATP New Orders - Check feasibility of potential orders")
         print("   • Recommendations - Actionable improvement suggestions")
-        print("   • Action Plan - Prioritized immediate actions\n")
+        print("   • Action Plan - Prioritized immediate actions")
+        print("\n💡 To check NEW ORDERS:")
+        print("   1. Open sheet '9_ATP_NEW_ORDERS'")
+        print("   2. Review sample results or modify Part_Code/Qty/Week")
+        print("   3. Re-run this script to update feasibility results\n")
 
     def _create_executive_summary(self, bottleneck_analyzer, risk_analyzer,
                                    recommendations_engine) -> pd.DataFrame:
