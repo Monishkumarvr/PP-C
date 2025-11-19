@@ -1426,6 +1426,417 @@ class ScenarioAnalyzer:
 
 ---
 
+## 6.5 Daily Production & Inventory Tracker (Executive Report Enhancement)
+
+### 6.5.1 Purpose
+Provide shop floor visibility with daily production targets and inventory snapshots in matrix format.
+
+### 6.5.2 Sheet Format (Option A: Date Rows × Part-Stage Columns)
+
+**Sheet: `DAILY_PRODUCTION`**
+
+```
+                         DGC-001                    MCB-009                    LKK-17
+Date        Week    CS    GR    MC    SP      CS    GR    MC    SP      CS    GR    MC    SP    Total
+─────────────────────────────────────────────────────────────────────────────────────────────────────
+2025-11-01   W5     50    45    40    35      30    25    20    15      20    18    15    12     325
+2025-11-03   W5     50    45    40    35      30    25    20    15      20    18    15    12     325
+2025-11-04   W5     50    45    40    35      30    25    20    15      20    18    15    12     325
+2025-11-05   W5     50    45    40    35      30    25    20    15      20    18    15    12     325
+2025-11-06   W5     50    45    40    35      30    25    20    15      20    18    15    12     325
+2025-11-07   W5     50    45    40    35      30    25    20    15      20    18    15    12     325
+2025-11-10   W6     45    42    38    32      28    23    18    14      18    16    14    10     298
+...
+```
+
+**Sheet: `DAILY_INVENTORY`**
+
+```
+                         DGC-001                          MCB-009                          LKK-17
+Date        Week    FG    SP    MC    GR    CS      FG    SP    MC    GR    CS      FG    SP    MC    GR    CS
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+2025-11-01   W5      0    25    45    50     0      37    26    52    56    36       0     0     0    10    20
+2025-11-03   W5      0    60    85    95    50      67    51    72    81    66      20    18    15    28    38
+2025-11-04   W5      0    95   125   140   100      97    76    92   106    96      40    36    30    46    56
+2025-11-05   W5     35   130   165   185   150     127   101   112   131   126      60    54    45    64    74
+...
+```
+
+### 6.5.3 Implementation Code
+
+Add to `production_plan_executive_test7sheets.py`:
+
+```python
+class DailyProductionInventoryTracker:
+    """
+    Generate daily production schedule and inventory snapshots in matrix format.
+
+    Output format: Date rows × Part-Stage columns
+    """
+
+    def __init__(self, weekly_summary, stage_plans, wip_by_part, config, calendar):
+        """
+        Args:
+            weekly_summary: DataFrame with weekly production by stage
+            stage_plans: Dict of DataFrames for each stage (casting_plan, grinding_plan, etc.)
+            wip_by_part: Initial WIP inventory by part
+            config: ProductionConfig instance
+            calendar: ProductionCalendar instance
+        """
+        self.weekly_summary = weekly_summary
+        self.stage_plans = stage_plans
+        self.wip_by_part = wip_by_part
+        self.config = config
+        self.calendar = calendar
+
+        # Get all unique parts
+        self.parts = self._get_all_parts()
+
+    def _get_all_parts(self) -> List[str]:
+        """Extract unique parts from stage plans."""
+        parts = set()
+        for stage_name, plan_df in self.stage_plans.items():
+            if not plan_df.empty and 'Part' in plan_df.columns:
+                parts.update(plan_df['Part'].unique())
+        return sorted(list(parts))
+
+    def generate_daily_production_sheet(self) -> pd.DataFrame:
+        """
+        Generate daily production matrix.
+
+        Rows: Calendar dates
+        Columns: Multi-index (Part, Stage) where Stage = CS, GR, MC, SP
+        """
+        records = []
+
+        for week in range(1, self.config.PLANNING_WEEKS + 1):
+            working_days = self.calendar.get_working_days_in_week(week)
+            num_days = len(working_days)
+
+            if num_days == 0:
+                continue
+
+            # Get weekly quantities per part per stage
+            weekly_qty = self._get_weekly_quantities_by_part(week)
+
+            for day in working_days:
+                record = {
+                    'Date': day.strftime('%Y-%m-%d'),
+                    'Week': f'W{week}'
+                }
+
+                row_total = 0
+
+                for part in self.parts:
+                    part_qty = weekly_qty.get(part, {})
+
+                    # Distribute weekly to daily (even split)
+                    for stage in ['CS', 'GR', 'MC', 'SP']:
+                        weekly_val = part_qty.get(stage, 0)
+                        daily_val = round(weekly_val / num_days, 1) if num_days > 0 else 0
+
+                        col_name = f'{part}_{stage}'
+                        record[col_name] = daily_val
+                        row_total += daily_val
+
+                record['Total'] = round(row_total, 1)
+                records.append(record)
+
+        df = pd.DataFrame(records)
+
+        # Reorder columns: Date, Week, then parts in order, then Total
+        base_cols = ['Date', 'Week']
+        part_cols = []
+        for part in self.parts:
+            for stage in ['CS', 'GR', 'MC', 'SP']:
+                part_cols.append(f'{part}_{stage}')
+
+        col_order = base_cols + part_cols + ['Total']
+        df = df[[c for c in col_order if c in df.columns]]
+
+        return df
+
+    def generate_daily_inventory_sheet(self) -> pd.DataFrame:
+        """
+        Generate daily inventory snapshot matrix.
+
+        Rows: Calendar dates
+        Columns: Multi-index (Part, WIP_Stage) where WIP_Stage = FG, SP, MC, GR, CS
+        """
+        records = []
+
+        # Initialize inventory from WIP
+        inventory = {}
+        for part in self.parts:
+            wip = self.wip_by_part.get(part, {})
+            inventory[part] = {
+                'FG': wip.get('FG', 0),
+                'SP': wip.get('SP', 0),
+                'MC': wip.get('MC', 0),
+                'GR': wip.get('GR', 0),
+                'CS': wip.get('CS', 0)
+            }
+
+        for week in range(1, self.config.PLANNING_WEEKS + 1):
+            working_days = self.calendar.get_working_days_in_week(week)
+            num_days = len(working_days)
+
+            if num_days == 0:
+                continue
+
+            # Get weekly production and delivery
+            weekly_prod = self._get_weekly_quantities_by_part(week)
+            weekly_deliv = self._get_weekly_deliveries_by_part(week)
+
+            for day_idx, day in enumerate(working_days):
+                # Update inventory based on daily production flow
+                # Simplified: distribute weekly changes evenly
+
+                for part in self.parts:
+                    prod = weekly_prod.get(part, {})
+                    deliv = weekly_deliv.get(part, 0)
+
+                    # Daily increments (simplified flow model)
+                    daily_cast = prod.get('CS', 0) / num_days if num_days > 0 else 0
+                    daily_grind = prod.get('GR', 0) / num_days if num_days > 0 else 0
+                    daily_mach = prod.get('MC', 0) / num_days if num_days > 0 else 0
+                    daily_paint = prod.get('SP', 0) / num_days if num_days > 0 else 0
+                    daily_deliv = deliv / num_days if num_days > 0 else 0
+
+                    # Update inventory (cumulative)
+                    # CS increases from casting, decreases to grinding
+                    inventory[part]['CS'] += daily_cast - daily_grind
+                    # GR increases from grinding, decreases to machining
+                    inventory[part]['GR'] += daily_grind - daily_mach
+                    # MC increases from machining, decreases to painting
+                    inventory[part]['MC'] += daily_mach - daily_paint
+                    # SP increases from painting, decreases to FG
+                    inventory[part]['SP'] += daily_paint - daily_deliv
+                    # FG increases from painting completion
+                    inventory[part]['FG'] += daily_deliv
+
+                    # Ensure non-negative
+                    for stage in ['FG', 'SP', 'MC', 'GR', 'CS']:
+                        inventory[part][stage] = max(0, inventory[part][stage])
+
+                # Record snapshot
+                record = {
+                    'Date': day.strftime('%Y-%m-%d'),
+                    'Week': f'W{week}'
+                }
+
+                for part in self.parts:
+                    for stage in ['FG', 'SP', 'MC', 'GR', 'CS']:
+                        col_name = f'{part}_{stage}'
+                        record[col_name] = round(inventory[part][stage], 0)
+
+                records.append(record)
+
+        df = pd.DataFrame(records)
+
+        # Reorder columns
+        base_cols = ['Date', 'Week']
+        part_cols = []
+        for part in self.parts:
+            for stage in ['FG', 'SP', 'MC', 'GR', 'CS']:
+                part_cols.append(f'{part}_{stage}')
+
+        col_order = base_cols + part_cols
+        df = df[[c for c in col_order if c in df.columns]]
+
+        return df
+
+    def _get_weekly_quantities_by_part(self, week: int) -> Dict[str, Dict[str, float]]:
+        """Get production quantities by part and stage for a week."""
+        result = {}
+
+        # Casting
+        if 'casting_plan' in self.stage_plans:
+            cast_df = self.stage_plans['casting_plan']
+            week_col = f'W{week}'
+            if week_col in cast_df.columns:
+                for _, row in cast_df.iterrows():
+                    part = row.get('Part', '')
+                    if part not in result:
+                        result[part] = {}
+                    result[part]['CS'] = row.get(week_col, 0)
+
+        # Grinding
+        if 'grinding_plan' in self.stage_plans:
+            grind_df = self.stage_plans['grinding_plan']
+            week_col = f'W{week}'
+            if week_col in grind_df.columns:
+                for _, row in grind_df.iterrows():
+                    part = row.get('Part', '')
+                    if part not in result:
+                        result[part] = {}
+                    result[part]['GR'] = row.get(week_col, 0)
+
+        # Machining (sum MC1+MC2+MC3)
+        mc_total = {}
+        for mc_stage in ['mc1_plan', 'mc2_plan', 'mc3_plan']:
+            if mc_stage in self.stage_plans:
+                mc_df = self.stage_plans[mc_stage]
+                week_col = f'W{week}'
+                if week_col in mc_df.columns:
+                    for _, row in mc_df.iterrows():
+                        part = row.get('Part', '')
+                        if part not in mc_total:
+                            mc_total[part] = 0
+                        mc_total[part] += row.get(week_col, 0)
+
+        for part, val in mc_total.items():
+            if part not in result:
+                result[part] = {}
+            result[part]['MC'] = val
+
+        # Painting (sum SP1+SP2+SP3)
+        sp_total = {}
+        for sp_stage in ['sp1_plan', 'sp2_plan', 'sp3_plan']:
+            if sp_stage in self.stage_plans:
+                sp_df = self.stage_plans[sp_stage]
+                week_col = f'W{week}'
+                if week_col in sp_df.columns:
+                    for _, row in sp_df.iterrows():
+                        part = row.get('Part', '')
+                        if part not in sp_total:
+                            sp_total[part] = 0
+                        sp_total[part] += row.get(week_col, 0)
+
+        for part, val in sp_total.items():
+            if part not in result:
+                result[part] = {}
+            result[part]['SP'] = val
+
+        return result
+
+    def _get_weekly_deliveries_by_part(self, week: int) -> Dict[str, float]:
+        """Get delivery quantities by part for a week."""
+        result = {}
+
+        if 'delivery_plan' in self.stage_plans:
+            deliv_df = self.stage_plans['delivery_plan']
+            week_col = f'W{week}'
+            if week_col in deliv_df.columns:
+                for _, row in deliv_df.iterrows():
+                    part = row.get('Part', '')
+                    result[part] = row.get(week_col, 0)
+
+        return result
+```
+
+### 6.5.4 Integration with Executive Report Generator
+
+Add to `FixedExecutiveReportGenerator` class:
+
+```python
+def _generate_daily_production_inventory_sheets(self, writer):
+    """Generate daily production and inventory tracker sheets."""
+
+    # Create tracker
+    tracker = DailyProductionInventoryTracker(
+        weekly_summary=self.weekly_summary,
+        stage_plans={
+            'casting_plan': self.results.get('casting_plan', pd.DataFrame()),
+            'grinding_plan': self.results.get('grinding_plan', pd.DataFrame()),
+            'mc1_plan': self.results.get('mc1_plan', pd.DataFrame()),
+            'mc2_plan': self.results.get('mc2_plan', pd.DataFrame()),
+            'mc3_plan': self.results.get('mc3_plan', pd.DataFrame()),
+            'sp1_plan': self.results.get('sp1_plan', pd.DataFrame()),
+            'sp2_plan': self.results.get('sp2_plan', pd.DataFrame()),
+            'sp3_plan': self.results.get('sp3_plan', pd.DataFrame()),
+            'delivery_plan': self.results.get('delivery_plan', pd.DataFrame())
+        },
+        wip_by_part=self.wip_by_part,
+        config=self.config,
+        calendar=self.calendar
+    )
+
+    # Generate and write Daily Production sheet
+    daily_prod_df = tracker.generate_daily_production_sheet()
+    daily_prod_df.to_excel(writer, sheet_name='DAILY_PRODUCTION', index=False)
+
+    # Format the sheet
+    worksheet = writer.sheets['DAILY_PRODUCTION']
+    self._format_daily_sheet(worksheet, daily_prod_df, 'production')
+
+    # Generate and write Daily Inventory sheet
+    daily_inv_df = tracker.generate_daily_inventory_sheet()
+    daily_inv_df.to_excel(writer, sheet_name='DAILY_INVENTORY', index=False)
+
+    # Format the sheet
+    worksheet = writer.sheets['DAILY_INVENTORY']
+    self._format_daily_sheet(worksheet, daily_inv_df, 'inventory')
+
+def _format_daily_sheet(self, worksheet, df, sheet_type):
+    """Apply formatting to daily tracker sheets."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    # Header formatting
+    header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
+    header_font = Font(color='FFFFFF', bold=True)
+
+    # Apply header formatting
+    for col in range(1, len(df.columns) + 1):
+        cell = worksheet.cell(row=1, column=col)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal='center')
+
+    # Auto-fit column widths
+    for col in range(1, len(df.columns) + 1):
+        col_letter = get_column_letter(col)
+        worksheet.column_dimensions[col_letter].width = 10
+
+    # Wider columns for Date and Week
+    worksheet.column_dimensions['A'].width = 12
+    worksheet.column_dimensions['B'].width = 6
+
+    # Freeze panes (freeze Date and Week columns)
+    worksheet.freeze_panes = 'C2'
+```
+
+### 6.5.5 Excel Column Header Format
+
+To create proper multi-level headers in Excel, modify the column names:
+
+```python
+def _create_multiindex_columns(self, df, parts):
+    """Create Excel-friendly multi-index column headers."""
+
+    # Option 1: Flat with part prefix (simpler)
+    # DGC-001_CS, DGC-001_GR, DGC-001_MC, DGC-001_SP
+
+    # Option 2: Two-row header (requires special Excel formatting)
+    # Row 1: DGC-001, DGC-001, DGC-001, DGC-001, MCB-009, ...
+    # Row 2: CS, GR, MC, SP, CS, ...
+
+    # For simplicity, use Option 1 with clear naming
+    pass
+```
+
+### 6.5.6 Usage Example
+
+```python
+# In the main report generation flow:
+
+def generate_executive_report(self, output_file):
+    with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+        # Existing sheets...
+        self._generate_casting_dashboard(writer)
+        self._generate_grinding_dashboard(writer)
+        # ... other dashboards ...
+
+        # NEW: Daily tracker sheets
+        self._generate_daily_production_inventory_sheets(writer)
+
+        print("✅ Generated DAILY_PRODUCTION sheet")
+        print("✅ Generated DAILY_INVENTORY sheet")
+```
+
+---
+
 ## 7. Output File Structure
 
 ### 7.1 New Excel Report: `production_plan_DECISION_SUPPORT.xlsx`
