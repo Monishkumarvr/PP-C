@@ -3512,7 +3512,11 @@ class FixedExecutiveReportGenerator:
         print(f"\n💾 Writing FIXED report to: {output_path}")
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
             for sheet_name, (df, sections) in sheets.items():
-                df.to_excel(writer, sheet_name=sheet_name, index=False, header=False)
+                # Daily tracker sheets need headers from DataFrame columns
+                if sheet_name in ['9_DAILY_PRODUCTION', '10_DAILY_INVENTORY']:
+                    df.to_excel(writer, sheet_name=sheet_name, index=False, header=True)
+                else:
+                    df.to_excel(writer, sheet_name=sheet_name, index=False, header=False)
                 print(f"  ✓ Created: {sheet_name}")
         
         print("\n🎨 Applying enhanced formatting...")
