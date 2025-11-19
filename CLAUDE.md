@@ -14,11 +14,20 @@ This repository contains a **Manufacturing Production Planning Optimization Syst
 PP-C/
 ├── production_plan_test.py                    # Core optimization engine (~3,100 lines)
 ├── production_plan_executive_test7sheets.py   # Executive reporting module (~3,600 lines)
+├── run_decision_support.py                    # Decision Support System entry point
+├── decision_support/                          # Decision Support System modules
+│   ├── __init__.py
+│   ├── bottleneck_analyzer.py                 # Identify capacity constraints
+│   ├── atp_calculator.py                      # Available-to-Promise calculator
+│   ├── order_risk_dashboard.py                # Risk classification by order
+│   └── recommendations_engine.py              # Actionable suggestions generator
 ├── Master_Data_Updated_Nov_Dec.xlsx           # Input: Part master, sales orders, constraints
 ├── Master_Data_Optimised_Updated__2_.xlsx     # Input: Alternative/updated master data
 ├── production_plan_COMPREHENSIVE_test.xlsx    # Output: Detailed optimization results
 ├── production_plan_EXECUTIVE_test.xlsx        # Output: Executive dashboard reports (10 sheets)
-├── DECISION_SUPPORT_IMPLEMENTATION.md         # Future decision support system design
+├── production_plan_DECISION_SUPPORT.xlsx      # Output: Decision support analysis (11 sheets)
+├── ATP_INPUT.xlsx                             # Input: User-defined orders for ATP check
+├── DECISION_SUPPORT_IMPLEMENTATION.md         # Decision support system design doc
 └── CLAUDE.md                                  # This file
 ```
 
@@ -72,6 +81,65 @@ PP-C/
 8. Part-Level Daily Schedule - Detailed machine assignments
 9. **Daily Production** - Matrix format (Date × Part-Stage columns)
 10. **Daily Inventory** - Matrix format (Date × Part-WIP columns)
+
+### 3. `run_decision_support.py` - Decision Support System
+
+**Purpose**: Analyzes optimizer results to provide actionable insights for production planning decisions.
+
+**Key Classes** (in `decision_support/` module):
+
+- `BottleneckAnalyzer` - Identifies capacity constraints (>85% utilization)
+- `ATPCalculator` - Calculates Available-to-Promise for new orders
+- `OrderRiskAnalyzer` - Classifies orders by risk level (Critical/High/Medium/Low)
+- `RecommendationsEngine` - Generates actionable suggestions based on analysis
+
+**Output Sheets Generated** (11 sheets):
+1. **Executive Summary** - Key metrics and KPIs at a glance
+2. **Bottleneck Analysis** - Resources operating above 85% utilization
+3. **Bottleneck Summary** - Aggregated overflow by resource
+4. **Order Risk** - All orders with risk classification
+5. **Risk by Customer** - Customer-level risk summary
+6. **Risk by Week** - Weekly risk distribution
+7. **Capacity Forecast** - Weekly capacity outlook
+8. **Capacity by Resource** - Available capacity matrix (Resource × Week)
+9. **ATP New Orders** - Feasibility check for potential new orders
+10. **Recommendations** - Prioritized actionable suggestions
+11. **Action Plan** - Immediate actions (top 2 per recommendation)
+
+**Risk Classification Criteria**:
+- **Critical**: Past due with unmet qty, or 0% fulfillment
+- **High**: Due within 1 week with unmet qty, or <50% fulfillment
+- **Medium**: Due within 2 weeks with unmet qty, or <100% fulfillment
+- **Low**: Fully fulfilled or no risk factors
+
+**Bottleneck Severity Thresholds**:
+- **Critical**: ≥100% utilization
+- **High**: ≥95% utilization
+- **Medium**: ≥85% utilization
+
+### Checking New Order Feasibility (ATP)
+
+The ATP feature allows checking if potential new orders can be fulfilled:
+
+**Workflow**:
+1. Run `python run_decision_support.py` (creates `ATP_INPUT.xlsx` template)
+2. Edit `ATP_INPUT.xlsx` with potential orders:
+   - `Part_Code`: Part/material code from Part Master
+   - `Qty`: Requested quantity
+   - `Requested_Week`: Desired delivery week
+3. Re-run `python run_decision_support.py`
+4. Check sheet `9_ATP_NEW_ORDERS` for results:
+   - `Feasible`: Yes/No
+   - `Earliest_Delivery`: When order can be delivered
+   - `Delay_Weeks`: Gap from requested date
+   - `Limiting_Resource`: Which resource blocks the order
+   - `Confidence`: High/Medium/Low
+
+**Example ATP Result**:
+```
+Part_Code | Qty | Requested_Week | Feasible | Earliest_Delivery | Limiting_Resource
+PART-001  | 100 | W5             | No       | W7                | Big_Line
+```
 
 ## Technology Stack
 
@@ -250,6 +318,9 @@ python production_plan_test.py
 
 # Generate executive reports (after running optimization)
 python production_plan_executive_test7sheets.py
+
+# Generate decision support analysis (after running optimization)
+python run_decision_support.py
 ```
 
 ### Typical Workflow
@@ -265,6 +336,22 @@ python production_plan_executive_test7sheets.py
 
 3. Run `production_plan_executive_test7sheets.py` for reports
    - Creates `production_plan_EXECUTIVE_test.xlsx`
+
+4. Run `run_decision_support.py` for decision support analysis
+   - Creates `production_plan_DECISION_SUPPORT.xlsx`
+   - Creates `ATP_INPUT.xlsx` (template for checking new orders)
+
+### Checking New Orders
+
+To check if new orders can be accepted:
+
+1. Run `python run_decision_support.py` once (creates template)
+2. Edit `ATP_INPUT.xlsx` with potential orders
+3. Re-run `python run_decision_support.py`
+4. Open `production_plan_DECISION_SUPPORT.xlsx`, sheet `9_ATP_NEW_ORDERS`
+5. Check results:
+   - **Feasible = Yes**: Quote the requested delivery date
+   - **Feasible = No**: Quote the `Earliest_Delivery` date or decline
 
 ## Code Conventions
 
@@ -354,32 +441,33 @@ def _safe_float(self, value):
    - Two-row headers with part names spanning stage columns
    - Frozen panes for easy navigation
 
-## Future Roadmap: Decision Support System
+## Decision Support System Status
 
-The current tool generates optimal schedules. Future development should transform it into a **decision support system** that answers:
+The system now includes a **decision support module** that answers key planning questions:
 
-1. **"Why can't we fulfill these orders?"** → Bottleneck Analysis
-2. **"Can we take this new order?"** → Available-to-Promise (ATP) Calculator
-3. **"Which orders need attention?"** → Order Risk Dashboard
-4. **"What should we do about it?"** → Recommendations Engine
+| Question | Module | Status |
+|----------|--------|--------|
+| "Why can't we fulfill these orders?" | `bottleneck_analyzer.py` | ✅ Implemented |
+| "Can we take this new order?" | `atp_calculator.py` | ✅ Implemented |
+| "Which orders need attention?" | `order_risk_dashboard.py` | ✅ Implemented |
+| "What should we do about it?" | `recommendations_engine.py` | ✅ Implemented |
+| "What if we add capacity/overtime?" | `scenario_analyzer.py` | 🔲 Future |
 
-### Planned Modules
+### Current Outputs
 
-| Phase | Module | Purpose |
-|-------|--------|---------|
-| 1 | `bottleneck_analyzer.py` | Identify resources blocking fulfillment |
-| 2 | `atp_calculator.py` | Check feasibility of new orders |
-| 3 | `order_risk_dashboard.py` | Classify orders by risk level |
-| 4 | `recommendations_engine.py` | Generate actionable suggestions |
-| 5 | `scenario_analyzer.py` | What-if analysis (add capacity, overtime) |
-
-### Key Outputs Needed
-
-- **Bottleneck Report**: Which resources block which orders
-- **ATP Response**: Earliest delivery date for new orders
-- **Risk Dashboard**: Critical/High/Medium/Low order classification
-- **Recommendations**: Overtime, outsourcing, rescheduling suggestions
+- **Bottleneck Report**: Resources at >85% utilization with overflow amounts
+- **ATP Response**: Feasibility, earliest delivery, limiting resource for new orders
+- **Risk Dashboard**: Critical/High/Medium/Low classification by order, customer, week
+- **Recommendations**: Prioritized suggestions with action items
 - **Capacity Forecast**: Available capacity by resource by week
+
+### Future Enhancements
+
+| Phase | Feature | Purpose |
+|-------|---------|---------|
+| 5 | `scenario_analyzer.py` | What-if analysis (add capacity, overtime) |
+| 6 | Interactive Dashboard | Web-based visualization |
+| 7 | Automated Alerts | Email/SMS for critical risks |
 
 ## Technical Improvements (Suggestions)
 
@@ -402,4 +490,4 @@ This is an internal manufacturing optimization tool. For issues:
 
 ---
 
-*Last updated: 2025-11-19*
+*Last updated: 2025-11-19 (Decision Support System v1.0)*
