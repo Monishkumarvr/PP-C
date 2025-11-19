@@ -399,6 +399,95 @@ def create_customer_analysis_chart(customer_fulfillment):
     return fig
 
 
+def create_bottleneck_analysis(weekly_summary, config):
+    """Analyze bottlenecks and resource constraints."""
+    bottlenecks = []
+
+    # Check casting line utilization
+    if 'Big_Line_Util_%' in weekly_summary.columns:
+        high_util_weeks = weekly_summary[weekly_summary['Big_Line_Util_%'] > 90]
+        if len(high_util_weeks) > 0:
+            max_util = weekly_summary['Big_Line_Util_%'].max()
+            bottlenecks.append({
+                'Resource': 'Big Casting Line',
+                'Max_Utilization': f"{max_util:.1f}%",
+                'Weeks_Over_90%': len(high_util_weeks),
+                'Peak_Week': int(weekly_summary.loc[weekly_summary['Big_Line_Util_%'].idxmax(), 'Week']),
+                'Severity': 'Critical' if max_util > 100 else 'High' if max_util > 95 else 'Medium'
+            })
+
+    if 'Small_Line_Util_%' in weekly_summary.columns:
+        high_util_weeks = weekly_summary[weekly_summary['Small_Line_Util_%'] > 90]
+        if len(high_util_weeks) > 0:
+            max_util = weekly_summary['Small_Line_Util_%'].max()
+            bottlenecks.append({
+                'Resource': 'Small Casting Line',
+                'Max_Utilization': f"{max_util:.1f}%",
+                'Weeks_Over_90%': len(high_util_weeks),
+                'Peak_Week': int(weekly_summary.loc[weekly_summary['Small_Line_Util_%'].idxmax(), 'Week']),
+                'Severity': 'Critical' if max_util > 100 else 'High' if max_util > 95 else 'Medium'
+            })
+
+    return pd.DataFrame(bottlenecks) if bottlenecks else pd.DataFrame()
+
+
+def simulate_capacity_change(weekly_summary, oee_change, overtime_hours):
+    """Simulate impact of capacity changes on utilization."""
+    simulated = weekly_summary.copy()
+
+    # Calculate new utilization with OEE change
+    oee_factor = 1 + (oee_change / 100)
+
+    util_columns = [col for col in simulated.columns if 'Util_%' in col]
+
+    for col in util_columns:
+        # Lower utilization with higher OEE (more capacity available)
+        simulated[f'{col}_New'] = simulated[col] / oee_factor
+
+        # Further reduce with overtime
+        if overtime_hours > 0:
+            # Assume base is 6 days * 24 hours = 144 hours/week
+            base_hours = 144
+            overtime_factor = base_hours / (base_hours + overtime_hours)
+            simulated[f'{col}_New'] = simulated[f'{col}_New'] * overtime_factor
+
+    return simulated
+
+
+def simulate_demand_scaling(weekly_summary, fulfillment_reports, scale_factor):
+    """Simulate impact of demand scaling on capacity."""
+    # Scale the production quantities
+    scaled_summary = weekly_summary.copy()
+
+    quantity_columns = [col for col in scaled_summary.columns
+                       if any(x in col for x in ['_Units', '_Tons'])]
+
+    for col in quantity_columns:
+        scaled_summary[col] = scaled_summary[col] * scale_factor
+
+    # Recalculate utilization (simplified - assumes linear scaling)
+    util_columns = [col for col in scaled_summary.columns if 'Util_%' in col]
+    for col in util_columns:
+        scaled_summary[col] = scaled_summary[col] * scale_factor
+
+    # Calculate impact on fulfillment
+    order_fulfillment = fulfillment_reports['order_fulfillment']
+    current_fulfilled = len(order_fulfillment[
+        order_fulfillment['Delivery_Status'].isin(['On-Time', 'Late', 'Fulfilled'])
+    ])
+
+    # Estimate new fulfillment (simplified model)
+    max_util = scaled_summary[[col for col in util_columns if col in scaled_summary.columns]].max().max() if util_columns else 0
+
+    if max_util > 100:
+        # Rough estimate: reduce fulfillment proportionally to over-capacity
+        estimated_fulfillment = current_fulfilled * (100 / max_util)
+    else:
+        estimated_fulfillment = current_fulfilled
+
+    return scaled_summary, estimated_fulfillment, max_util
+
+
 def generate_excel_report(all_results):
     """Generate comprehensive Excel report."""
     output = io.BytesIO()
@@ -622,11 +711,12 @@ def main():
         fulfillment_reports = all_results['fulfillment_reports']
 
         # Results tabs
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
             "📊 Dashboard",
             "📈 Capacity Analysis",
             "📦 Production Schedule",
             "🚚 Delivery Tracking",
+            "🔮 What-If Analysis",
             "📥 Download"
         ])
 
@@ -769,6 +859,297 @@ def main():
             )
 
         with tab5:
+            st.header("What-If Analysis")
+            st.markdown("Simulate different scenarios to understand capacity constraints and plan improvements.")
+
+            # Create sub-tabs for different analyses
+            whatif_tab1, whatif_tab2, whatif_tab3 = st.tabs([
+                "🔧 Capacity Scenarios",
+                "📊 Demand Scaling",
+                "⚠️ Bottleneck Analysis"
+            ])
+
+            with whatif_tab1:
+                st.subheader("Capacity Improvement Scenarios")
+                st.markdown("Simulate the impact of improving OEE or adding overtime hours.")
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    oee_change = st.slider(
+                        "OEE Improvement (%)",
+                        min_value=-10,
+                        max_value=20,
+                        value=0,
+                        step=1,
+                        help="Increase OEE to see reduced utilization"
+                    )
+
+                with col2:
+                    overtime_hours = st.slider(
+                        "Weekly Overtime Hours",
+                        min_value=0,
+                        max_value=48,
+                        value=0,
+                        step=4,
+                        help="Add overtime hours per week"
+                    )
+
+                if oee_change != 0 or overtime_hours > 0:
+                    simulated = simulate_capacity_change(
+                        results['weekly_summary'],
+                        oee_change,
+                        overtime_hours
+                    )
+
+                    # Show comparison
+                    st.subheader("Utilization Comparison")
+
+                    # Create comparison chart
+                    weeks = simulated['Week'].tolist()
+
+                    fig = go.Figure()
+
+                    if 'Big_Line_Util_%' in simulated.columns:
+                        fig.add_trace(go.Bar(
+                            x=weeks,
+                            y=simulated['Big_Line_Util_%'],
+                            name='Current Big Line',
+                            marker_color='#1F4788',
+                            opacity=0.6
+                        ))
+
+                        if 'Big_Line_Util_%_New' in simulated.columns:
+                            fig.add_trace(go.Bar(
+                                x=weeks,
+                                y=simulated['Big_Line_Util_%_New'],
+                                name='Improved Big Line',
+                                marker_color='#28a745'
+                            ))
+
+                    fig.add_hline(y=100, line_dash="dash", line_color="red",
+                                  annotation_text="100% Capacity")
+
+                    fig.update_layout(
+                        title='Current vs Improved Utilization',
+                        xaxis_title='Week',
+                        yaxis_title='Utilization %',
+                        barmode='group',
+                        height=400
+                    )
+
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # Summary metrics
+                    col1, col2, col3 = st.columns(3)
+
+                    with col1:
+                        if 'Big_Line_Util_%' in simulated.columns:
+                            current_max = simulated['Big_Line_Util_%'].max()
+                            st.metric("Current Max Util", f"{current_max:.1f}%")
+
+                    with col2:
+                        if 'Big_Line_Util_%_New' in simulated.columns:
+                            new_max = simulated['Big_Line_Util_%_New'].max()
+                            reduction = current_max - new_max
+                            st.metric("New Max Util", f"{new_max:.1f}%",
+                                     delta=f"-{reduction:.1f}%")
+
+                    with col3:
+                        if 'Big_Line_Util_%_New' in simulated.columns:
+                            weeks_over = len(simulated[simulated['Big_Line_Util_%_New'] > 100])
+                            st.metric("Weeks Over Capacity", weeks_over)
+
+                else:
+                    st.info("Adjust the sliders above to simulate capacity improvements.")
+
+            with whatif_tab2:
+                st.subheader("Demand Scaling Analysis")
+                st.markdown("See how changes in demand affect capacity utilization.")
+
+                scale_percent = st.slider(
+                    "Demand Scale (%)",
+                    min_value=50,
+                    max_value=200,
+                    value=100,
+                    step=10,
+                    help="100% = current demand, 150% = 50% increase"
+                )
+
+                scale_factor = scale_percent / 100
+
+                if scale_factor != 1.0:
+                    scaled_summary, est_fulfillment, max_util = simulate_demand_scaling(
+                        results['weekly_summary'],
+                        fulfillment_reports,
+                        scale_factor
+                    )
+
+                    # Summary metrics
+                    col1, col2, col3 = st.columns(3)
+
+                    order_fulfillment = fulfillment_reports['order_fulfillment']
+                    current_fulfilled = len(order_fulfillment[
+                        order_fulfillment['Delivery_Status'].isin(['On-Time', 'Late', 'Fulfilled'])
+                    ])
+                    total_orders = len(order_fulfillment)
+
+                    with col1:
+                        scaled_orders = int(total_orders * scale_factor)
+                        st.metric("Scaled Orders", scaled_orders,
+                                 delta=f"{scaled_orders - total_orders:+d}")
+
+                    with col2:
+                        st.metric("Peak Utilization", f"{max_util:.1f}%",
+                                 delta="Over capacity!" if max_util > 100 else "OK")
+
+                    with col3:
+                        est_rate = (est_fulfillment / (total_orders * scale_factor) * 100) if scale_factor > 0 else 0
+                        st.metric("Est. Fulfillment Rate", f"{est_rate:.1f}%")
+
+                    # Show scaled utilization chart
+                    weeks = scaled_summary['Week'].tolist()
+
+                    fig = go.Figure()
+
+                    util_cols = [col for col in scaled_summary.columns if 'Util_%' in col and '_New' not in col]
+
+                    for col in util_cols[:2]:  # Show first 2 utilization columns
+                        fig.add_trace(go.Bar(
+                            x=weeks,
+                            y=scaled_summary[col],
+                            name=col.replace('_', ' ').replace('Util %', 'Utilization')
+                        ))
+
+                    fig.add_hline(y=100, line_dash="dash", line_color="red",
+                                  annotation_text="100% Capacity")
+
+                    fig.update_layout(
+                        title=f'Utilization at {scale_percent}% Demand',
+                        xaxis_title='Week',
+                        yaxis_title='Utilization %',
+                        barmode='group',
+                        height=400
+                    )
+
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # Warning if over capacity
+                    if max_util > 100:
+                        st.warning(f"""
+                        **Capacity Exceeded!** At {scale_percent}% demand, peak utilization reaches {max_util:.1f}%.
+
+                        **Recommendations:**
+                        - Add overtime hours to increase capacity
+                        - Improve OEE through maintenance
+                        - Consider outsourcing peak demand
+                        - Negotiate delivery dates with customers
+                        """)
+
+                else:
+                    st.info("Adjust the slider to simulate demand changes.")
+
+            with whatif_tab3:
+                st.subheader("Bottleneck Analysis")
+                st.markdown("Identify resource constraints limiting production.")
+
+                # Get bottleneck analysis
+                bottleneck_df = create_bottleneck_analysis(
+                    results['weekly_summary'],
+                    all_results['config']
+                )
+
+                if not bottleneck_df.empty:
+                    # Show severity colors
+                    st.dataframe(
+                        bottleneck_df,
+                        use_container_width=True,
+                        column_config={
+                            "Severity": st.column_config.TextColumn(
+                                "Severity",
+                                help="Critical: >100%, High: >95%, Medium: >90%"
+                            )
+                        }
+                    )
+
+                    # Recommendations based on bottlenecks
+                    st.subheader("Recommendations")
+
+                    for _, row in bottleneck_df.iterrows():
+                        severity = row['Severity']
+                        resource = row['Resource']
+
+                        if severity == 'Critical':
+                            st.error(f"""
+                            **{resource}** - CRITICAL
+
+                            Immediate actions required:
+                            - Add overtime shifts in week {row['Peak_Week']}
+                            - Consider outsourcing some orders
+                            - Review order priorities and reschedule non-critical orders
+                            """)
+                        elif severity == 'High':
+                            st.warning(f"""
+                            **{resource}** - HIGH RISK
+
+                            Preventive actions recommended:
+                            - Plan overtime for weeks with >95% utilization
+                            - Improve OEE through preventive maintenance
+                            - Build safety stock in earlier weeks
+                            """)
+                        else:
+                            st.info(f"""
+                            **{resource}** - MEDIUM RISK
+
+                            Monitor closely:
+                            - Track daily utilization
+                            - Prepare contingency plans
+                            - Consider minor schedule adjustments
+                            """)
+
+                else:
+                    st.success("No significant bottlenecks detected! All resources are operating within acceptable limits.")
+
+                # Utilization heatmap
+                st.subheader("Weekly Utilization Heatmap")
+
+                weekly_summary = results['weekly_summary']
+                util_data = []
+
+                for _, row in weekly_summary.iterrows():
+                    week = int(row['Week'])
+                    if 'Big_Line_Util_%' in row:
+                        util_data.append({
+                            'Week': week,
+                            'Resource': 'Big Line',
+                            'Utilization': row['Big_Line_Util_%']
+                        })
+                    if 'Small_Line_Util_%' in row:
+                        util_data.append({
+                            'Week': week,
+                            'Resource': 'Small Line',
+                            'Utilization': row['Small_Line_Util_%']
+                        })
+
+                if util_data:
+                    heatmap_df = pd.DataFrame(util_data)
+                    pivot_df = heatmap_df.pivot(index='Resource', columns='Week', values='Utilization')
+
+                    fig = px.imshow(
+                        pivot_df,
+                        labels=dict(x="Week", y="Resource", color="Utilization %"),
+                        color_continuous_scale=['green', 'yellow', 'red'],
+                        aspect='auto'
+                    )
+
+                    fig.update_layout(
+                        title='Resource Utilization Heatmap',
+                        height=300
+                    )
+
+                    st.plotly_chart(fig, use_container_width=True)
+
+        with tab6:
             st.header("Download Reports")
 
             # Generate and download Excel report
