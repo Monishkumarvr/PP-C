@@ -86,6 +86,9 @@ class DecisionSupportReportGenerator:
         capacity_summary = atp_calculator.get_capacity_summary_by_week()
 
         # 5. ATP Template for New Orders
+        # Create input template if it doesn't exist
+        atp_calculator.create_input_template()
+        # Check orders from input file or use samples
         atp_template = atp_calculator.create_atp_template()
 
         # 6. Recommendations
