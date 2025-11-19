@@ -370,20 +370,20 @@ def create_fulfillment_chart(order_fulfillment):
 def create_customer_analysis_chart(customer_fulfillment):
     """Create customer fulfillment analysis chart."""
     # Sort by total ordered quantity
-    top_customers = customer_fulfillment.nlargest(10, 'Total_Ordered')
+    top_customers = customer_fulfillment.nlargest(10, 'Ordered_Qty')
 
     fig = go.Figure()
 
     fig.add_trace(go.Bar(
         x=top_customers['Customer'],
-        y=top_customers['Total_Ordered'],
+        y=top_customers['Ordered_Qty'],
         name='Ordered',
         marker_color='#1F4788'
     ))
 
     fig.add_trace(go.Bar(
         x=top_customers['Customer'],
-        y=top_customers['Total_Delivered'],
+        y=top_customers['Delivered_Qty'],
         name='Delivered',
         marker_color='#28a745'
     ))
