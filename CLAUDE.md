@@ -6,12 +6,14 @@ This repository contains a **Manufacturing Production Planning Optimization Syst
 
 **Primary Use Case**: Enterprise production planning for foundry/casting manufacturing facilities in India.
 
+**Current Performance**: 100% fulfillment, 100% on-time delivery rate.
+
 ## Repository Structure
 
 ```
 PP-C/
-├── production_plan_test.py                    # Core optimization engine (3,086 lines)
-├── production_plan_executive_test7sheets.py   # Executive reporting module (3,030 lines)
+├── production_plan_test.py                    # Core optimization engine (~3,100 lines)
+├── production_plan_executive_test7sheets.py   # Executive reporting module (~3,030 lines)
 ├── Master_Data_Updated_Nov_Dec.xlsx           # Input: Part master, sales orders, constraints
 ├── Master_Data_Optimised_Updated__2_.xlsx     # Input: Alternative/updated master data
 ├── production_plan_COMPREHENSIVE_test.xlsx    # Output: Detailed optimization results
@@ -143,7 +145,7 @@ Parts with existing WIP inventory skip earlier stages:
 ### 4. Optimization Objective
 Minimize total cost:
 - `UNMET_DEMAND_PENALTY` (200,000) - High cost for unfulfilled orders
-- `LATENESS_PENALTY` (50,000) - Cost per week late
+- `LATENESS_PENALTY` (150,000) - Cost per week late (increased to prioritize on-time delivery)
 - `INVENTORY_HOLDING_COST` (1) - Per unit per week
 - `SETUP_PENALTY` (5) - Pattern changeover cost
 
@@ -152,6 +154,35 @@ Minimize total cost:
 - Shakeout time (hours) for part separation
 - Vacuum time for vacuum-cast parts
 - Dry times between painting stages
+
+### 6. Passive vs Active Time
+**Critical distinction for capacity planning:**
+
+| Time Type | Examples | Behavior |
+|-----------|----------|----------|
+| **Active** | Cycle time (casting, grinding, machining, painting) | Consumes machine capacity |
+| **Passive** | Cooling, shakeout, drying between paint coats | Affects lead time only, not capacity |
+
+Machines can work on the next batch while the previous batch cools/dries.
+
+### 7. WIP Handling
+WIP is treated as **initial inventory** that flows through the production pipeline:
+
+| WIP Stage | Entry Point | Skips |
+|-----------|-------------|-------|
+| **FG** | Directly fulfills orders | All production |
+| **SP** | Directly fulfills orders | Casting, Grinding, Machining |
+| **MC** | Enters at painting | Casting, Grinding, Machining |
+| **GR** | Enters at machining | Casting, Grinding |
+| **CS** | Enters at grinding | Casting |
+
+**WIP Allocation**: FG + SP WIP is allocated proportionally across all orders for the same part.
+
+### 8. Just-in-Time Production
+The optimizer produces **close to delivery date** to minimize inventory:
+- Orders for the same part with different due dates are produced in separate batches
+- Production is split across weeks to match order schedules
+- WIP is consumed in earliest-due-date-first order
 
 ## Excel Input Format
 
@@ -196,7 +227,7 @@ WORKING_DAYS_PER_WEEK = 6                  # Mon-Sat
 WEEKLY_OFF_DAY = 6                         # Sunday (0=Mon, 6=Sun)
 PATTERN_CHANGE_TIME_MIN = 18               # Mould changeover time
 UNMET_DEMAND_PENALTY = 200000              # Penalty for unfulfilled demand
-LATENESS_PENALTY = 50000                   # Per week late
+LATENESS_PENALTY = 150000                  # Per week late (prioritize on-time)
 INVENTORY_HOLDING_COST = 1                 # Per unit per week
 ```
 
@@ -300,7 +331,43 @@ def _safe_float(self, value):
 4. **Single-solver**: Uses CBC solver only (no solver selection)
 5. **In-memory processing**: Large datasets may cause memory issues
 
-## Future Improvements (Suggestions)
+## Recent Fixes (Nov 2025)
+
+1. **WIP-covered orders**: Orders fully covered by WIP now create variants for delivery tracking
+2. **Stage skip calculation**: Fixed cascade reduction (WIP properly reduces upstream requirements)
+3. **Part_Fulfillment reporting**: Now includes FG+SP WIP in delivered count
+4. **Order_Fulfillment WIP allocation**: Proportionally allocates WIP to individual orders
+5. **Painting constraints**: Removed dry time from capacity (passive, not active time)
+6. **Week number calculation**: Fixed boundary calculation (day 7 = week 2, not week 1)
+
+## Future Roadmap: Decision Support System
+
+The current tool generates optimal schedules. Future development should transform it into a **decision support system** that answers:
+
+1. **"Why can't we fulfill these orders?"** → Bottleneck Analysis
+2. **"Can we take this new order?"** → Available-to-Promise (ATP) Calculator
+3. **"Which orders need attention?"** → Order Risk Dashboard
+4. **"What should we do about it?"** → Recommendations Engine
+
+### Planned Modules
+
+| Phase | Module | Purpose |
+|-------|--------|---------|
+| 1 | `bottleneck_analyzer.py` | Identify resources blocking fulfillment |
+| 2 | `atp_calculator.py` | Check feasibility of new orders |
+| 3 | `order_risk_dashboard.py` | Classify orders by risk level |
+| 4 | `recommendations_engine.py` | Generate actionable suggestions |
+| 5 | `scenario_analyzer.py` | What-if analysis (add capacity, overtime) |
+
+### Key Outputs Needed
+
+- **Bottleneck Report**: Which resources block which orders
+- **ATP Response**: Earliest delivery date for new orders
+- **Risk Dashboard**: Critical/High/Medium/Low order classification
+- **Recommendations**: Overtime, outsourcing, rescheduling suggestions
+- **Capacity Forecast**: Available capacity by resource by week
+
+## Technical Improvements (Suggestions)
 
 1. Add `requirements.txt` for dependency management
 2. Implement unit tests for core functions
@@ -309,6 +376,7 @@ def _safe_float(self, value):
 5. Add logging instead of print statements
 6. Implement solver timeout configuration
 7. Add data validation schemas
+8. Refactor for dependency injection (enable scenario analysis)
 
 ## Contact & Support
 

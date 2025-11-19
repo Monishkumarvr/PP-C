@@ -196,6 +196,289 @@ class MasterDataEnricher:
         return result
 
 
+class DailyProductionInventoryTracker:
+    """
+    Generate daily production schedule and inventory snapshots in matrix format.
+
+    Output format: Date rows × Part-Stage columns
+    """
+
+    def __init__(self, part_daily_schedule, wip_initial, calendar, num_weeks, start_date):
+        """
+        Args:
+            part_daily_schedule: DataFrame with daily production entries
+            wip_initial: DataFrame with initial WIP by part
+            calendar: ProductionCalendar instance
+            num_weeks: Number of planning weeks
+            start_date: Planning start date
+        """
+        self.part_daily_schedule = part_daily_schedule
+        self.wip_initial = wip_initial
+        self.calendar = calendar
+        self.num_weeks = num_weeks
+        self.start_date = start_date
+
+        # Get all unique parts
+        self.parts = self._get_all_parts()
+
+        # Load initial WIP by part
+        self.wip_by_part = self._load_wip_by_part()
+
+    def _get_all_parts(self):
+        """Extract unique parts from daily schedule."""
+        if self.part_daily_schedule.empty or 'Part' not in self.part_daily_schedule.columns:
+            return []
+        return sorted(self.part_daily_schedule['Part'].unique().tolist())
+
+    def _load_wip_by_part(self):
+        """Load initial WIP inventory by part."""
+        wip_by_part = {}
+
+        if self.wip_initial.empty or 'Part' not in self.wip_initial.columns:
+            return wip_by_part
+
+        for _, row in self.wip_initial.iterrows():
+            part = row.get('Part', '')
+            if part:
+                wip_by_part[part] = {
+                    'FG': float(row.get('FG', 0) or 0),
+                    'SP': float(row.get('SP', 0) or 0),
+                    'MC': float(row.get('MC', 0) or 0),
+                    'GR': float(row.get('GR', 0) or 0),
+                    'CS': float(row.get('CS', 0) or 0)
+                }
+
+        return wip_by_part
+
+    def generate_daily_production_sheet(self):
+        """
+        Generate daily production matrix.
+
+        Rows: Calendar dates
+        Columns: Date, Week, then Part_Stage columns, then Total
+        """
+        if self.part_daily_schedule.empty:
+            return pd.DataFrame()
+
+        # Aggregate daily production by Date, Part, and Stage
+        daily_agg = self._aggregate_daily_production()
+
+        records = []
+
+        for week in range(1, self.num_weeks + 1):
+            working_days = self.calendar.get_working_days_in_week(week)
+
+            for day in working_days:
+                date_str = day.strftime('%Y-%m-%d')
+                record = {
+                    'Date': date_str,
+                    'Week': f'W{week}'
+                }
+
+                row_total = 0
+
+                for part in self.parts:
+                    for stage in ['CS', 'GR', 'MC', 'SP']:
+                        col_name = f'{part}_{stage}'
+                        val = daily_agg.get((date_str, part, stage), 0)
+                        record[col_name] = int(val) if val > 0 else 0
+                        row_total += val
+
+                record['Total'] = int(row_total)
+                records.append(record)
+
+        df = pd.DataFrame(records)
+
+        # Reorder columns
+        if not df.empty:
+            base_cols = ['Date', 'Week']
+            part_cols = []
+            for part in self.parts:
+                for stage in ['CS', 'GR', 'MC', 'SP']:
+                    col_name = f'{part}_{stage}'
+                    if col_name in df.columns:
+                        part_cols.append(col_name)
+
+            col_order = base_cols + part_cols + ['Total']
+            df = df[[c for c in col_order if c in df.columns]]
+
+        return df
+
+    def _aggregate_daily_production(self):
+        """Aggregate Part_Daily_Schedule into {(date, part, stage): units} dict."""
+        agg = {}
+
+        # Map operation names to stage codes
+        op_to_stage = {
+            'Casting': 'CS',
+            'Grinding': 'GR',
+            'MC1': 'MC', 'MC2': 'MC', 'MC3': 'MC',
+            'SP1': 'SP', 'SP2': 'SP', 'SP3': 'SP'
+        }
+
+        for _, row in self.part_daily_schedule.iterrows():
+            date_str = row.get('Date', '')
+            part = row.get('Part', '')
+            operation = row.get('Operation', '')
+            units = int(row.get('Units', 0) or 0)
+
+            # Skip non-production stages
+            if operation not in op_to_stage:
+                continue
+
+            stage = op_to_stage[operation]
+            key = (date_str, part, stage)
+
+            # For MC and SP, we only count once (not sum all three stages)
+            # Use the final stage as the count (MC3 for machining, SP3 for painting)
+            if operation in ['MC1', 'MC2', 'SP1', 'SP2']:
+                continue  # Skip intermediate stages
+
+            agg[key] = agg.get(key, 0) + units
+
+        return agg
+
+    def generate_daily_inventory_sheet(self):
+        """
+        Generate daily inventory snapshot matrix.
+
+        Rows: Calendar dates
+        Columns: Date, Week, then Part_WIP_Stage columns
+        """
+        if self.part_daily_schedule.empty:
+            return pd.DataFrame()
+
+        records = []
+
+        # Initialize inventory from WIP
+        inventory = {}
+        for part in self.parts:
+            wip = self.wip_by_part.get(part, {})
+            inventory[part] = {
+                'FG': wip.get('FG', 0),
+                'SP': wip.get('SP', 0),
+                'MC': wip.get('MC', 0),
+                'GR': wip.get('GR', 0),
+                'CS': wip.get('CS', 0)
+            }
+
+        # Get daily production and delivery aggregates
+        daily_prod = self._get_daily_production_by_part()
+        daily_deliv = self._get_daily_deliveries_by_part()
+
+        for week in range(1, self.num_weeks + 1):
+            working_days = self.calendar.get_working_days_in_week(week)
+
+            for day in working_days:
+                date_str = day.strftime('%Y-%m-%d')
+
+                # Update inventory based on daily production flow
+                for part in self.parts:
+                    prod = daily_prod.get((date_str, part), {})
+                    deliv = daily_deliv.get((date_str, part), 0)
+
+                    # Daily production at each stage
+                    daily_cast = prod.get('CS', 0)
+                    daily_grind = prod.get('GR', 0)
+                    daily_mach = prod.get('MC', 0)
+                    daily_paint = prod.get('SP', 0)
+
+                    # Update inventory (cumulative flow)
+                    # CS: increases from casting, decreases to grinding
+                    inventory[part]['CS'] += daily_cast - daily_grind
+                    # GR: increases from grinding, decreases to machining
+                    inventory[part]['GR'] += daily_grind - daily_mach
+                    # MC: increases from machining, decreases to painting
+                    inventory[part]['MC'] += daily_mach - daily_paint
+                    # SP: increases from painting, decreases to delivery
+                    inventory[part]['SP'] += daily_paint - deliv
+                    # FG: increases from delivery (finished goods shipped)
+                    inventory[part]['FG'] += deliv
+
+                    # Ensure non-negative
+                    for stage in ['FG', 'SP', 'MC', 'GR', 'CS']:
+                        inventory[part][stage] = max(0, inventory[part][stage])
+
+                # Record snapshot
+                record = {
+                    'Date': date_str,
+                    'Week': f'W{week}'
+                }
+
+                for part in self.parts:
+                    for stage in ['FG', 'SP', 'MC', 'GR', 'CS']:
+                        col_name = f'{part}_{stage}'
+                        record[col_name] = int(inventory[part][stage])
+
+                records.append(record)
+
+        df = pd.DataFrame(records)
+
+        # Reorder columns
+        if not df.empty:
+            base_cols = ['Date', 'Week']
+            part_cols = []
+            for part in self.parts:
+                for stage in ['FG', 'SP', 'MC', 'GR', 'CS']:
+                    col_name = f'{part}_{stage}'
+                    if col_name in df.columns:
+                        part_cols.append(col_name)
+
+            col_order = base_cols + part_cols
+            df = df[[c for c in col_order if c in df.columns]]
+
+        return df
+
+    def _get_daily_production_by_part(self):
+        """Get daily production by part and stage: {(date, part): {stage: units}}."""
+        result = {}
+
+        op_to_stage = {
+            'Casting': 'CS',
+            'Grinding': 'GR',
+            'MC3': 'MC',  # Only count final machining stage
+            'SP3': 'SP'   # Only count final painting stage
+        }
+
+        for _, row in self.part_daily_schedule.iterrows():
+            date_str = row.get('Date', '')
+            part = row.get('Part', '')
+            operation = row.get('Operation', '')
+            units = int(row.get('Units', 0) or 0)
+
+            if operation not in op_to_stage:
+                continue
+
+            stage = op_to_stage[operation]
+            key = (date_str, part)
+
+            if key not in result:
+                result[key] = {'CS': 0, 'GR': 0, 'MC': 0, 'SP': 0}
+
+            result[key][stage] += units
+
+        return result
+
+    def _get_daily_deliveries_by_part(self):
+        """Get daily deliveries by part: {(date, part): units}."""
+        result = {}
+
+        # Deliveries happen when SP3 (final painting) completes
+        # In practice, we'd have a separate delivery schedule
+        # For now, use SP3 completion as delivery indicator
+        for _, row in self.part_daily_schedule.iterrows():
+            date_str = row.get('Date', '')
+            part = row.get('Part', '')
+            operation = row.get('Operation', '')
+            units = int(row.get('Units', 0) or 0)
+
+            if operation == 'SP3':
+                key = (date_str, part)
+                result[key] = result.get(key, 0) + units
+
+        return result
+
+
 class FixedExecutiveReportGenerator:
     """FIXED version - shows all 8 production stages"""
 
@@ -2722,10 +3005,14 @@ class FixedExecutiveReportGenerator:
 
         if sheet_name == '1_EXECUTIVE_DASHBOARD' and sections:
             self._format_dashboard(ws, sections)
-        elif sheet_name == '8_DAILY_SCHEDULE':
+        elif sheet_name == '7_DAILY_SCHEDULE':
             self._format_daily_schedule(ws, df)
-        elif sheet_name == '9_PART_DAILY_SCHEDULE':
+        elif sheet_name == '8_PART_DAILY_SCHEDULE':
             self._format_part_daily_schedule(ws, df)
+        elif sheet_name in ['9_DAILY_PRODUCTION', '10_DAILY_INVENTORY']:
+            sheet_type = 'production' if 'PRODUCTION' in sheet_name else 'inventory'
+            self._format_daily_tracker_sheet(ws, df, sheet_type)
+            return  # Skip auto-size as we set fixed widths
         else:
             self._format_standard_sheet(ws, df)
 
@@ -3048,25 +3335,139 @@ class FixedExecutiveReportGenerator:
                     cell.font = Font(name='Calibri', size=10)
                     cell.alignment = Alignment(horizontal='left', vertical='center')
 
+    def create_daily_production_tracker(self):
+        """Create daily production tracker sheet using DailyProductionInventoryTracker."""
+        print("  📊 Creating Daily Production Tracker...")
+
+        # Get Part_Daily_Schedule data
+        part_daily = self.data.get('Part_Daily_Schedule', pd.DataFrame())
+
+        if part_daily.empty:
+            print("    ⚠ No Part_Daily_Schedule data available for production tracker")
+            return pd.DataFrame({'Note': ['No daily schedule data available']})
+
+        # Get WIP initial data
+        wip_initial = self.data.get('WIP_Initial', pd.DataFrame())
+
+        # Create tracker
+        tracker = DailyProductionInventoryTracker(
+            part_daily_schedule=part_daily,
+            wip_initial=wip_initial,
+            calendar=self.calendar,
+            num_weeks=self.num_weeks,
+            start_date=self.start_date
+        )
+
+        # Generate production sheet
+        production_df = tracker.generate_daily_production_sheet()
+
+        if production_df.empty:
+            return pd.DataFrame({'Note': ['No production data generated']})
+
+        print(f"    ✓ Created production tracker with {len(production_df)} rows × {len(production_df.columns)} columns")
+        return production_df
+
+    def create_daily_inventory_tracker(self):
+        """Create daily inventory tracker sheet using DailyProductionInventoryTracker."""
+        print("  📊 Creating Daily Inventory Tracker...")
+
+        # Get Part_Daily_Schedule data
+        part_daily = self.data.get('Part_Daily_Schedule', pd.DataFrame())
+
+        if part_daily.empty:
+            print("    ⚠ No Part_Daily_Schedule data available for inventory tracker")
+            return pd.DataFrame({'Note': ['No daily schedule data available']})
+
+        # Get WIP initial data
+        wip_initial = self.data.get('WIP_Initial', pd.DataFrame())
+
+        # Create tracker
+        tracker = DailyProductionInventoryTracker(
+            part_daily_schedule=part_daily,
+            wip_initial=wip_initial,
+            calendar=self.calendar,
+            num_weeks=self.num_weeks,
+            start_date=self.start_date
+        )
+
+        # Generate inventory sheet
+        inventory_df = tracker.generate_daily_inventory_sheet()
+
+        if inventory_df.empty:
+            return pd.DataFrame({'Note': ['No inventory data generated']})
+
+        print(f"    ✓ Created inventory tracker with {len(inventory_df)} rows × {len(inventory_df.columns)} columns")
+        return inventory_df
+
+    def _format_daily_tracker_sheet(self, ws, df, sheet_type):
+        """Apply formatting to daily tracker sheets."""
+        from openpyxl.utils import get_column_letter
+
+        if df.empty or len(df.columns) < 2:
+            return
+
+        # Header formatting
+        header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
+        header_font = Font(color='FFFFFF', bold=True, size=10)
+
+        # Apply header formatting
+        for col in range(1, len(df.columns) + 1):
+            cell = ws.cell(row=1, column=col)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+
+        # Data formatting
+        for row in range(2, len(df) + 2):
+            # Alternate row colors
+            row_fill = PatternFill(
+                start_color='F8F9FA' if row % 2 == 0 else 'FFFFFF',
+                end_color='F8F9FA' if row % 2 == 0 else 'FFFFFF',
+                fill_type='solid'
+            )
+
+            for col in range(1, len(df.columns) + 1):
+                cell = ws.cell(row=row, column=col)
+                cell.fill = row_fill
+                cell.font = Font(name='Calibri', size=9)
+
+                # Left align Date and Week, right align numbers
+                if col <= 2:
+                    cell.alignment = Alignment(horizontal='left', vertical='center')
+                else:
+                    cell.alignment = Alignment(horizontal='right', vertical='center')
+
+        # Set column widths
+        ws.column_dimensions['A'].width = 12  # Date
+        ws.column_dimensions['B'].width = 6   # Week
+
+        # Set width for part columns (narrower for matrix format)
+        for col in range(3, len(df.columns) + 1):
+            col_letter = get_column_letter(col)
+            ws.column_dimensions[col_letter].width = 8
+
+        # Freeze panes (freeze Date and Week columns)
+        ws.freeze_panes = 'C2'
+
     def _auto_size_columns(self, ws):
         """Auto-size columns with maximum width"""
         for col_num in range(1, ws.max_column + 1):
             max_length = 0
             column_letter = None
-            
+
             for row_num in range(1, ws.max_row + 1):
                 cell = ws.cell(row=row_num, column=col_num)
-                
+
                 if isinstance(cell, type(ws.cell(1, 1))):
                     if column_letter is None:
                         column_letter = cell.column_letter
-                    
+
                     try:
                         if cell.value:
                             max_length = max(max_length, len(str(cell.value)))
                     except:
                         pass
-            
+
             if column_letter:
                 adjusted_width = min(max_length + 3, 60)
                 ws.column_dimensions[column_letter].width = adjusted_width
@@ -3075,8 +3476,8 @@ class FixedExecutiveReportGenerator:
         """Main method to generate FIXED executive report with ALL 8 stages"""
         
         print("\n" + "="*80)
-        print("GENERATING FIXED EXECUTIVE 9-SHEET REPORT")
-        print("NOW SHOWS ALL 8 PRODUCTION STAGES + DAILY & PART-LEVEL SCHEDULES")
+        print("GENERATING FIXED EXECUTIVE 10-SHEET REPORT")
+        print("NOW SHOWS ALL 8 PRODUCTION STAGES + DAILY TRACKERS")
         print("="*80 + "\n")
         
         self.load_detailed_data()
@@ -3092,6 +3493,8 @@ class FixedExecutiveReportGenerator:
         # gantt_timeline_df = self.create_gantt_timeline()  # REMOVED per user request
         daily_schedule_df = self.create_daily_schedule()
         part_daily_schedule_df = self.create_part_daily_schedule()
+        daily_production_df = self.create_daily_production_tracker()
+        daily_inventory_df = self.create_daily_inventory_tracker()
 
         sheets = {
             '1_EXECUTIVE_DASHBOARD': (dashboard_df, dashboard_sections),
@@ -3101,7 +3504,9 @@ class FixedExecutiveReportGenerator:
             '5_CAPACITY_OVERVIEW': (capacity_overview_df, None),
             '6_MATERIAL_FLOW': (material_flow_df, None),
             '7_DAILY_SCHEDULE': (daily_schedule_df, None),
-            '8_PART_DAILY_SCHEDULE': (part_daily_schedule_df, None)
+            '8_PART_DAILY_SCHEDULE': (part_daily_schedule_df, None),
+            '9_DAILY_PRODUCTION': (daily_production_df, None),
+            '10_DAILY_INVENTORY': (daily_inventory_df, None)
         }
         
         print(f"\n💾 Writing FIXED report to: {output_path}")
@@ -3124,8 +3529,8 @@ class FixedExecutiveReportGenerator:
         print("✅ FIXED EXECUTIVE REPORT GENERATED SUCCESSFULLY!")
         print("="*80)
         print(f"\n📁 Output: {output_path}")
-        print(f"📊 Sheets: 8 executive-level sheets (including Daily & Part-Level Schedules)")
-        print("\n🎯 FIXED ISSUES:")
+        print(f"📊 Sheets: 10 executive-level sheets (including Daily Trackers)")
+        print("\n🎯 FEATURES:")
         print("   ✓ ALL 8 stages now visible in Executive Dashboard")
         print("   ✓ Casting, Grinding, MC1, MC2, MC3, SP1, SP2, SP3")
         print("   ✓ Proper capacity calculations for each stage")
@@ -3133,7 +3538,9 @@ class FixedExecutiveReportGenerator:
         print("   ✓ Complete bottleneck analysis")
         print("   ✓ Full capacity overview across all stages")
         print("   ✓ Daily Schedule with calendar dates and holidays")
-        print("   ✓ Part-Level Daily Schedule with machine assignments\n")
+        print("   ✓ Part-Level Daily Schedule with machine assignments")
+        print("   ✓ Daily Production Tracker (Date × Part-Stage matrix)")
+        print("   ✓ Daily Inventory Tracker (Date × Part-WIP matrix)\n")
 
 
 def main():
@@ -3146,11 +3553,11 @@ def main():
     
     print("="*80)
     print("EXECUTIVE REPORT GENERATOR - WITH MASTER DATA ENRICHMENT")
-    print("Now includes ALL 8 production stages + Master Data enrichment")
+    print("Now includes ALL 8 production stages + Daily Trackers")
     print("="*80)
     print(f"\nInput:  {detailed_output} (27 sheets - includes Part_Daily_Schedule)")
     print(f"Master: {master_data} (Part Master with machines, weights, cycle times)")
-    print(f"Output: {executive_output} (9 sheets - ENRICHED)")
+    print(f"Output: {executive_output} (10 sheets - ENRICHED)")
     print(f"Start Date: {start_date.strftime('%Y-%m-%d')}\n")
     
     generator = FixedExecutiveReportGenerator(detailed_output, start_date=start_date, master_data_path=master_data)
