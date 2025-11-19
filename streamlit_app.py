@@ -211,10 +211,11 @@ def create_kpi_dashboard(results, fulfillment_reports):
 
     # Calculate KPIs
     total_orders = len(order_fulfillment)
-    fulfilled_orders = len(order_fulfillment[order_fulfillment['Fulfilled'] == 'Yes'])
+    # Fulfilled = On-Time, Late, or Fulfilled (not 'Not Fulfilled' or 'Partial')
+    fulfilled_orders = len(order_fulfillment[order_fulfillment['Delivery_Status'].isin(['On-Time', 'Late', 'Fulfilled'])])
     fulfillment_rate = (fulfilled_orders / total_orders * 100) if total_orders > 0 else 0
 
-    on_time_orders = len(order_fulfillment[order_fulfillment['On_Time'] == 'Yes'])
+    on_time_orders = len(order_fulfillment[order_fulfillment['Delivery_Status'] == 'On-Time'])
     on_time_rate = (on_time_orders / total_orders * 100) if total_orders > 0 else 0
 
     total_demand = order_fulfillment['Ordered_Qty'].sum()
@@ -346,13 +347,19 @@ def create_production_flow_chart(weekly_summary):
 def create_fulfillment_chart(order_fulfillment):
     """Create order fulfillment status chart."""
     # Fulfillment status pie chart
-    fulfillment_counts = order_fulfillment['Fulfilled'].value_counts()
+    fulfillment_counts = order_fulfillment['Delivery_Status'].value_counts()
 
     fig = px.pie(
         values=fulfillment_counts.values,
         names=fulfillment_counts.index,
         title='Order Fulfillment Status',
-        color_discrete_map={'Yes': '#28a745', 'No': '#dc3545', 'Partial': '#ffc107'}
+        color_discrete_map={
+            'On-Time': '#28a745',
+            'Late': '#ffc107',
+            'Partial': '#fd7e14',
+            'Not Fulfilled': '#dc3545',
+            'Fulfilled': '#17a2b8'
+        }
     )
 
     fig.update_layout(height=350)
@@ -368,14 +375,14 @@ def create_customer_analysis_chart(customer_fulfillment):
     fig = go.Figure()
 
     fig.add_trace(go.Bar(
-        x=top_customers['Sold_To_Party'],
+        x=top_customers['Customer'],
         y=top_customers['Total_Ordered'],
         name='Ordered',
         marker_color='#1F4788'
     ))
 
     fig.add_trace(go.Bar(
-        x=top_customers['Sold_To_Party'],
+        x=top_customers['Customer'],
         y=top_customers['Total_Delivered'],
         name='Delivered',
         marker_color='#28a745'
@@ -731,24 +738,25 @@ def main():
             col1, col2, col3 = st.columns(3)
             with col1:
                 total = len(order_fulfillment)
-                fulfilled = len(order_fulfillment[order_fulfillment['Fulfilled'] == 'Yes'])
+                fulfilled = len(order_fulfillment[order_fulfillment['Delivery_Status'].isin(['On-Time', 'Late', 'Fulfilled'])])
                 st.metric("Fulfilled Orders", f"{fulfilled}/{total}")
             with col2:
-                on_time = len(order_fulfillment[order_fulfillment['On_Time'] == 'Yes'])
+                on_time = len(order_fulfillment[order_fulfillment['Delivery_Status'] == 'On-Time'])
                 st.metric("On-Time Orders", f"{on_time}/{total}")
             with col3:
-                late = len(order_fulfillment[order_fulfillment['On_Time'] == 'No'])
+                late = len(order_fulfillment[order_fulfillment['Delivery_Status'] == 'Late'])
                 st.metric("Late Orders", f"{late}")
 
             # Filter by status
+            available_statuses = order_fulfillment['Delivery_Status'].unique().tolist()
             status_filter = st.multiselect(
-                "Filter by Fulfillment Status",
-                options=['Yes', 'No', 'Partial'],
-                default=['Yes', 'No', 'Partial']
+                "Filter by Delivery Status",
+                options=available_statuses,
+                default=available_statuses
             )
 
             filtered_orders = order_fulfillment[
-                order_fulfillment['Fulfilled'].isin(status_filter)
+                order_fulfillment['Delivery_Status'].isin(status_filter)
             ]
 
             st.dataframe(filtered_orders, use_container_width=True, height=400)
