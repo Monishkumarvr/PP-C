@@ -3428,15 +3428,11 @@ class FixedExecutiveReportGenerator:
         # Row 1: Part names (merged across stages)
         # Row 2: Stage labels (CS, GR, MC, SP or FG, SP, MC, GR, CS)
 
-        # Date and Week in row 1
-        ws.cell(row=1, column=1, value='')
-        ws.cell(row=1, column=2, value='')
+        # Date and Week headers - set values in top-left cell before merging
+        ws.cell(row=1, column=1, value='Date')
+        ws.cell(row=1, column=2, value='Week')
         ws.merge_cells('A1:A2')
         ws.merge_cells('B1:B2')
-
-        # Set Date and Week headers in row 2
-        ws.cell(row=2, column=1, value='Date')
-        ws.cell(row=2, column=2, value='Week')
 
         # Part names and stage labels
         col_idx = 3
@@ -3460,8 +3456,7 @@ class FixedExecutiveReportGenerator:
 
         # Total column (if present)
         if 'Total' in df.columns:
-            ws.cell(row=1, column=col_idx, value='')
-            ws.cell(row=2, column=col_idx, value='Total')
+            ws.cell(row=1, column=col_idx, value='Total')
             ws.merge_cells(start_row=1, start_column=col_idx, end_row=2, end_column=col_idx)
 
         # Apply header formatting to rows 1 and 2
