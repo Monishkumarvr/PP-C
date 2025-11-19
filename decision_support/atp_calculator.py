@@ -415,12 +415,96 @@ class ATPCalculator:
 
         return []
 
-    def create_atp_template(self) -> pd.DataFrame:
+    def load_orders_from_file(self, input_path: str = 'ATP_INPUT.xlsx') -> List[Dict]:
         """
-        Create an ATP input template with sample entries.
+        Load potential orders from an Excel input file.
 
-        Users can modify this template to check their potential orders.
+        Expected columns: Part_Code, Qty, Requested_Week
+
+        Args:
+            input_path: Path to the input Excel file
+
+        Returns:
+            List of order dicts
         """
+        import os
+
+        if not os.path.exists(input_path):
+            return []
+
+        try:
+            df = pd.read_excel(input_path)
+
+            # Normalize column names
+            df.columns = [col.strip().replace(' ', '_') for col in df.columns]
+
+            orders = []
+            for _, row in df.iterrows():
+                # Try different column name variations
+                part_code = None
+                for col in ['Part_Code', 'Part', 'Material_Code', 'FG_Code']:
+                    if col in df.columns and pd.notna(row.get(col)):
+                        part_code = str(row[col])
+                        break
+
+                qty = 0
+                for col in ['Qty', 'Quantity', 'Requested_Qty', 'Order_Qty']:
+                    if col in df.columns and pd.notna(row.get(col)):
+                        try:
+                            qty = int(row[col])
+                        except:
+                            pass
+                        break
+
+                week = 1
+                for col in ['Requested_Week', 'Week', 'Delivery_Week']:
+                    if col in df.columns and pd.notna(row.get(col)):
+                        week_val = row[col]
+                        if isinstance(week_val, str) and week_val.startswith('W'):
+                            week = int(week_val[1:])
+                        else:
+                            try:
+                                week = int(week_val)
+                            except:
+                                pass
+                        break
+
+                if part_code and qty > 0:
+                    orders.append({
+                        'part_code': part_code,
+                        'qty': qty,
+                        'requested_week': week
+                    })
+
+            print(f"    ✓ Loaded {len(orders)} orders from {input_path}")
+            return orders
+
+        except Exception as e:
+            print(f"    ⚠ Could not read {input_path}: {e}")
+            return []
+
+    def create_atp_template(self, input_path: str = 'ATP_INPUT.xlsx') -> pd.DataFrame:
+        """
+        Create ATP results from input file or sample entries.
+
+        If ATP_INPUT.xlsx exists, use those orders.
+        Otherwise, create sample entries for demonstration.
+
+        Args:
+            input_path: Path to optional input file with orders to check
+        """
+        # Try to load from input file first
+        user_orders = self.load_orders_from_file(input_path)
+
+        if user_orders:
+            # User provided orders - check those
+            print(f"    📋 Checking {len(user_orders)} orders from input file...")
+            return self.check_multiple_orders(user_orders)
+
+        # No input file - create sample entries
+        print("    ℹ No ATP_INPUT.xlsx found - using sample orders")
+        print("    💡 Create ATP_INPUT.xlsx with columns: Part_Code, Qty, Requested_Week")
+
         # Get available parts for reference
         available_parts = self.get_available_parts()
 
@@ -509,3 +593,33 @@ class ATPCalculator:
             records.append(row)
 
         return pd.DataFrame(records)
+
+    def create_input_template(self, output_path: str = 'ATP_INPUT.xlsx'):
+        """
+        Create a blank ATP input template file for users to fill in.
+
+        Args:
+            output_path: Path to create the template file
+        """
+        import os
+
+        if os.path.exists(output_path):
+            print(f"    ⚠ {output_path} already exists - not overwriting")
+            return
+
+        # Get some available parts for examples
+        available_parts = self.get_available_parts()
+        sample_parts = available_parts[:3] if available_parts else ['PART-001', 'PART-002', 'PART-003']
+
+        # Create template with example rows
+        template_data = {
+            'Part_Code': sample_parts + [''] * 7,  # 3 examples + 7 blank rows
+            'Qty': [100, 200, 150] + [None] * 7,
+            'Requested_Week': [5, 6, 7] + [None] * 7
+        }
+
+        df = pd.DataFrame(template_data)
+        df.to_excel(output_path, index=False)
+
+        print(f"    ✓ Created input template: {output_path}")
+        print(f"    📝 Edit this file with your potential orders, then re-run the script")
