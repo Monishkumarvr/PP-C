@@ -13,11 +13,12 @@ This repository contains a **Manufacturing Production Planning Optimization Syst
 ```
 PP-C/
 ├── production_plan_test.py                    # Core optimization engine (~3,100 lines)
-├── production_plan_executive_test7sheets.py   # Executive reporting module (~3,030 lines)
+├── production_plan_executive_test7sheets.py   # Executive reporting module (~3,600 lines)
 ├── Master_Data_Updated_Nov_Dec.xlsx           # Input: Part master, sales orders, constraints
 ├── Master_Data_Optimised_Updated__2_.xlsx     # Input: Alternative/updated master data
 ├── production_plan_COMPREHENSIVE_test.xlsx    # Output: Detailed optimization results
-├── production_plan_EXECUTIVE_test.xlsx        # Output: Executive dashboard reports
+├── production_plan_EXECUTIVE_test.xlsx        # Output: Executive dashboard reports (10 sheets)
+├── DECISION_SUPPORT_IMPLEMENTATION.md         # Future decision support system design
 └── CLAUDE.md                                  # This file
 ```
 
@@ -57,12 +58,20 @@ PP-C/
 
 - `ProductionCalendar` - Working day calculations
 - `MasterDataEnricher` - Enriches schedules with master data (cycle times, machines)
+- `DailyProductionInventoryTracker` - Matrix format daily production and inventory snapshots
 - `FixedExecutiveReportGenerator` - Multi-sheet Excel report generation
 
-**Output Sheets Generated**:
-- Executive Dashboard per stage (8 sheets)
-- Daily Schedule (aggregate with calendar dates)
-- Part-Level Daily Schedule (detailed machine assignments)
+**Output Sheets Generated** (10 sheets):
+1. Executive Dashboard - KPIs and stage summaries
+2. Master Schedule - Weekly production plan
+3. Delivery Tracker - Order fulfillment status
+4. Bottleneck Alerts - Capacity constraints
+5. Capacity Overview - Utilization by stage
+6. Material Flow - WIP movement tracking
+7. Daily Schedule - Aggregate daily totals with calendar dates
+8. Part-Level Daily Schedule - Detailed machine assignments
+9. **Daily Production** - Matrix format (Date × Part-Stage columns)
+10. **Daily Inventory** - Matrix format (Date × Part-WIP columns)
 
 ## Technology Stack
 
@@ -339,6 +348,11 @@ def _safe_float(self, value):
 4. **Order_Fulfillment WIP allocation**: Proportionally allocates WIP to individual orders
 5. **Painting constraints**: Removed dry time from capacity (passive, not active time)
 6. **Week number calculation**: Fixed boundary calculation (day 7 = week 2, not week 1)
+7. **Daily Production & Inventory Tracker**: New matrix format sheets for shop floor visibility
+   - `9_DAILY_PRODUCTION`: Date rows × Part-Stage columns (CS, GR, MC, SP)
+   - `10_DAILY_INVENTORY`: Date rows × Part-WIP columns (FG, SP, MC, GR, CS)
+   - Two-row headers with part names spanning stage columns
+   - Frozen panes for easy navigation
 
 ## Future Roadmap: Decision Support System
 
@@ -388,4 +402,4 @@ This is an internal manufacturing optimization tool. For issues:
 
 ---
 
-*Last updated: 2025-11-18*
+*Last updated: 2025-11-19*
