@@ -3400,33 +3400,93 @@ class FixedExecutiveReportGenerator:
         return inventory_df
 
     def _format_daily_tracker_sheet(self, ws, df, sheet_type):
-        """Apply formatting to daily tracker sheets."""
+        """Apply formatting to daily tracker sheets with two-row headers."""
         from openpyxl.utils import get_column_letter
 
         if df.empty or len(df.columns) < 2:
             return
 
+        # Extract parts from column names (format: Part_Stage)
+        parts = []
+        stages_per_part = 4 if sheet_type == 'production' else 5  # CS,GR,MC,SP or FG,SP,MC,GR,CS
+        stage_labels = ['CS', 'GR', 'MC', 'SP'] if sheet_type == 'production' else ['FG', 'SP', 'MC', 'GR', 'CS']
+
+        for col in df.columns:
+            if '_' in col and col not in ['Date', 'Week', 'Total']:
+                part = col.rsplit('_', 1)[0]
+                if part not in parts:
+                    parts.append(part)
+
+        # Insert a new row at the top for part names
+        ws.insert_rows(1)
+
         # Header formatting
-        header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
+        header_fill = PatternFill(start_color='1F4788', end_color='1F4788', fill_type='solid')
+        subheader_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
         header_font = Font(color='FFFFFF', bold=True, size=10)
 
-        # Apply header formatting
-        for col in range(1, len(df.columns) + 1):
-            cell = ws.cell(row=1, column=col)
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = Alignment(horizontal='center', vertical='center')
+        # Row 1: Part names (merged across stages)
+        # Row 2: Stage labels (CS, GR, MC, SP or FG, SP, MC, GR, CS)
 
-        # Data formatting
-        for row in range(2, len(df) + 2):
+        # Date and Week in row 1
+        ws.cell(row=1, column=1, value='')
+        ws.cell(row=1, column=2, value='')
+        ws.merge_cells('A1:A2')
+        ws.merge_cells('B1:B2')
+
+        # Set Date and Week headers in row 2
+        ws.cell(row=2, column=1, value='Date')
+        ws.cell(row=2, column=2, value='Week')
+
+        # Part names and stage labels
+        col_idx = 3
+        for part in parts:
+            # Merge cells for part name (spans across stages)
+            start_col = col_idx
+            end_col = col_idx + stages_per_part - 1
+
+            ws.cell(row=1, column=start_col, value=part)
+            if end_col > start_col:
+                ws.merge_cells(
+                    start_row=1, start_column=start_col,
+                    end_row=1, end_column=end_col
+                )
+
+            # Stage labels in row 2
+            for i, stage in enumerate(stage_labels):
+                ws.cell(row=2, column=col_idx + i, value=stage)
+
+            col_idx += stages_per_part
+
+        # Total column (if present)
+        if 'Total' in df.columns:
+            ws.cell(row=1, column=col_idx, value='')
+            ws.cell(row=2, column=col_idx, value='Total')
+            ws.merge_cells(start_row=1, start_column=col_idx, end_row=2, end_column=col_idx)
+
+        # Apply header formatting to rows 1 and 2
+        for col in range(1, ws.max_column + 1):
+            cell1 = ws.cell(row=1, column=col)
+            cell2 = ws.cell(row=2, column=col)
+
+            cell1.fill = header_fill
+            cell1.font = header_font
+            cell1.alignment = Alignment(horizontal='center', vertical='center')
+
+            cell2.fill = subheader_fill
+            cell2.font = header_font
+            cell2.alignment = Alignment(horizontal='center', vertical='center')
+
+        # Data formatting (rows 3+)
+        for row in range(3, ws.max_row + 1):
             # Alternate row colors
             row_fill = PatternFill(
-                start_color='F8F9FA' if row % 2 == 0 else 'FFFFFF',
-                end_color='F8F9FA' if row % 2 == 0 else 'FFFFFF',
+                start_color='F8F9FA' if row % 2 == 1 else 'FFFFFF',
+                end_color='F8F9FA' if row % 2 == 1 else 'FFFFFF',
                 fill_type='solid'
             )
 
-            for col in range(1, len(df.columns) + 1):
+            for col in range(1, ws.max_column + 1):
                 cell = ws.cell(row=row, column=col)
                 cell.fill = row_fill
                 cell.font = Font(name='Calibri', size=9)
@@ -3442,12 +3502,12 @@ class FixedExecutiveReportGenerator:
         ws.column_dimensions['B'].width = 6   # Week
 
         # Set width for part columns (narrower for matrix format)
-        for col in range(3, len(df.columns) + 1):
+        for col in range(3, ws.max_column + 1):
             col_letter = get_column_letter(col)
-            ws.column_dimensions[col_letter].width = 8
+            ws.column_dimensions[col_letter].width = 6
 
-        # Freeze panes (freeze Date and Week columns)
-        ws.freeze_panes = 'C2'
+        # Freeze panes (freeze Date, Week columns and header rows)
+        ws.freeze_panes = 'C3'
 
     def _auto_size_columns(self, ws):
         """Auto-size columns with maximum width"""
@@ -3512,6 +3572,7 @@ class FixedExecutiveReportGenerator:
         print(f"\n💾 Writing FIXED report to: {output_path}")
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
             for sheet_name, (df, sections) in sheets.items():
+                # All sheets written without headers - formatting adds custom headers
                 df.to_excel(writer, sheet_name=sheet_name, index=False, header=False)
                 print(f"  ✓ Created: {sheet_name}")
         
