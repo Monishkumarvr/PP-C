@@ -211,9 +211,9 @@ class DailyOptimizationModel:
         self.x_sp3 = {}
         self.x_delivery = {}
         self.x_unmet = {}
-        self.x_late_days = {}
 
         # Note: Removed inventory stage tracking (not constrained, cost now based on delivery timing)
+        # Note: Removed x_late_days (lateness calculated directly in objective like weekly optimizer)
     
     def build_and_solve(self):
         """Build complete model and solve."""
@@ -222,14 +222,15 @@ class DailyOptimizationModel:
         print("="*80)
         
         self.model = pulp.LpProblem("Daily_Production_Planning", pulp.LpMinimize)
-        
+
         # Build components
         self._create_decision_variables()
         self._add_objective_function()
         self._add_capacity_constraints()
+        self._add_box_constraints()
         self._add_flow_constraints()
         self._add_demand_constraints()
-        
+
         print("\n✓ Model built successfully")
         print(f"  Variables: {len(self.model.variables()):,}")
         print(f"  Constraints: {len(self.model.constraints):,}")
@@ -317,18 +318,17 @@ class DailyOptimizationModel:
                     f"deliv_{v}_{d.strftime('%Y%m%d')}", 0, None, cat='Integer'
                 )
         
-        # Unmet demand and lateness
+        # Unmet demand (no separate lateness variable - calculated directly in objective like weekly)
         for v in variants:
             self.x_unmet[v] = pulp.LpVariable(f"unmet_{v}", 0, None)
-            self.x_late_days[v] = pulp.LpVariable(f"late_{v}", 0, None)
 
         # Note: Removed inventory stage variables (inv_cs, inv_gr, etc.) since they weren't constrained
-        # Inventory cost is now based on early delivery timing (like weekly optimizer)
+        # Note: Removed x_late_days variable - lateness calculated directly in objective like weekly optimizer
 
         print(f"  ✓ Created decision variables")
     
     def _add_objective_function(self):
-        """Add objective: minimize cost (matching weekly optimizer logic)."""
+        """Add objective: minimize cost (matching weekly optimizer logic exactly)."""
         print("\n🎯 Adding objective function...")
 
         objective_terms = []
@@ -337,9 +337,17 @@ class DailyOptimizationModel:
         for v in self.daily_demand.keys():
             objective_terms.append(self.config.UNMET_DEMAND_PENALTY * self.x_unmet[v])
 
-        # Lateness penalty (for deliveries after due date)
+        # Lateness penalty - calculated directly like weekly optimizer (no separate variable)
         for v in self.daily_demand.keys():
-            objective_terms.append(self.config.LATENESS_PENALTY_PER_DAY * self.x_late_days[v])
+            part, due_day = self.part_day_mapping[v]
+            due_day_idx = self.day_index[due_day]
+
+            for d_idx, d in enumerate(self.working_days):
+                days_late = max(0, d_idx - due_day_idx)
+                if days_late > 0:
+                    objective_terms.append(
+                        self.config.LATENESS_PENALTY_PER_DAY * days_late * self.x_delivery[(v, d)]
+                    )
 
         # Inventory holding cost - ONLY penalize deliveries > MAX_EARLY_DAYS (like weekly optimizer)
         for v in self.daily_demand.keys():
@@ -356,7 +364,7 @@ class DailyOptimizationModel:
                     )
 
         self.model += pulp.lpSum(objective_terms), "Total_Cost"
-        print("  ✓ Objective function added (with MAX_EARLY_DAYS buffer)")
+        print("  ✓ Objective function added (lateness + inventory costs, matching weekly logic)")
     
     def _add_capacity_constraints(self):
         """Add daily capacity constraints for all resources."""
@@ -435,7 +443,46 @@ class DailyOptimizationModel:
         
         print(f"  ✓ Added {len(self.working_days) * 2} casting line capacity constraints")
         print(f"  ✓ Added {len(self.machine_manager.machines) * len(self.working_days)} machine capacity constraints")
-    
+
+    def _add_box_constraints(self):
+        """Add mould box capacity constraints (daily version of weekly logic)."""
+        print("\n📦 Adding mould box capacity constraints...")
+
+        box_variants = defaultdict(list)
+        for v in self.daily_demand.keys():
+            part, _ = self.part_day_mapping[v]
+            if part not in self.params:
+                continue
+
+            box_size = self.params[part].get('box_size')
+            box_qty = self.params[part].get('box_quantity', 0)
+            if box_size and box_size != 'Unknown' and box_qty > 0:
+                box_variants[box_size].append((v, max(1, int(box_qty))))
+
+        constraints_added = 0
+        for box_size, vlist in box_variants.items():
+            base_cap = self.box_manager.get_capacity(box_size)
+            if base_cap == 0:
+                continue
+
+            # Daily capacity = weekly capacity / 6 working days
+            daily_cap = base_cap / 6.0 * 0.90  # With OEE
+
+            for d in self.working_days:
+                terms = []
+                for (v, box_qty) in vlist:
+                    moulds_per_unit = 1.0 / float(box_qty)
+                    terms.append(self.x_casting[(v, d)] * moulds_per_unit)
+
+                if terms:
+                    self.model += (
+                        pulp.lpSum(terms) <= daily_cap,
+                        f"Box_{box_size}_D{d.strftime('%Y%m%d')}"
+                    )
+                    constraints_added += 1
+
+        print(f"  ✓ Added {constraints_added} mould box capacity constraints")
+
     def _add_flow_constraints(self):
         """Add CUMULATIVE material flow constraints (like weekly optimizer)."""
         print("\n🔄 Adding CUMULATIVE flow constraints with stage seriality...")
@@ -586,13 +633,13 @@ class DailyOptimizationModel:
         print(f"  ✓ Added {cnt:,} cumulative flow constraints (forces production through all stages)")
     
     def _add_demand_constraints(self):
-        """Add demand fulfillment and delivery timing constraints."""
-        print("\n📦 Adding demand and delivery constraints...")
-        
+        """Add demand fulfillment constraints (lateness calculated in objective, not here)."""
+        print("\n📦 Adding demand constraints...")
+
         for v in self.daily_demand.keys():
             demand_qty = self.daily_demand[v]
             part, due_day = self.part_day_mapping[v]
-            
+
             # Total delivered + unmet = demand
             total_delivered = pulp.lpSum(
                 self.x_delivery[(v, d)] for d in self.working_days
@@ -601,18 +648,10 @@ class DailyOptimizationModel:
                 total_delivered + self.x_unmet[v] == demand_qty,
                 f"Demand_{v}"
             )
-            
-            # Calculate lateness (days late)
-            due_day_idx = self.day_index[due_day]
-            
-            for d_idx, d in enumerate(self.working_days):
-                if d_idx > due_day_idx:
-                    days_late = d_idx - due_day_idx
-                    self.model += (
-                        self.x_late_days[v] >= self.x_delivery[(v, d)] * days_late / demand_qty,
-                        f"Late_{v}_{d.strftime('%Y%m%d')}"
-                    )
-        
+
+        # Note: Lateness is calculated directly in objective function (like weekly optimizer)
+        # No separate lateness constraints needed
+
         print(f"  ✓ Added demand constraints for {len(self.daily_demand)} variants")
 
 
@@ -858,23 +897,30 @@ class DailyResultsAnalyzer:
         return pd.DataFrame(weekly_data)
     
     def _analyze_fulfillment(self):
-        """Analyze order fulfillment."""
+        """Analyze order fulfillment - calculate lateness from actual deliveries."""
         print("\n✓ Analyzing fulfillment...")
-        
+
         fulfillment_data = []
-        
+
         for v in self.daily_demand.keys():
             demand_qty = self.daily_demand[v]
             part, due_day = self.part_day_mapping[v]
-            
+            due_day_idx = self.calendar.working_days.index(due_day) if due_day in self.calendar.working_days else 0
+
             delivered = sum(
                 float(pulp.value(self.model.x_delivery[(v, d)]) or 0)
                 for d in self.calendar.working_days
             )
-            
+
             unmet = float(pulp.value(self.model.x_unmet[v]) or 0)
-            late_days = float(pulp.value(self.model.x_late_days[v]) or 0)
-            
+
+            # Calculate lateness from actual delivery dates
+            late_days = 0.0
+            for d_idx, d in enumerate(self.calendar.working_days):
+                delivery_qty = float(pulp.value(self.model.x_delivery[(v, d)]) or 0)
+                if delivery_qty > 0 and d_idx > due_day_idx:
+                    late_days = max(late_days, d_idx - due_day_idx)
+
             fulfillment_data.append({
                 'Variant': v,
                 'Part': part,
@@ -884,10 +930,10 @@ class DailyResultsAnalyzer:
                 'Unmet_Qty': round(unmet, 2),
                 'Late_Days': round(late_days, 1),
                 'Fulfillment_%': round(delivered / demand_qty * 100, 1) if demand_qty > 0 else 0,
-                'Status': 'On-Time' if late_days < 0.5 and unmet < 0.5 else 
+                'Status': 'On-Time' if late_days < 0.5 and unmet < 0.5 else
                          ('Late' if unmet < 0.5 else 'Partial')
             })
-        
+
         return pd.DataFrame(fulfillment_data)
 
 
