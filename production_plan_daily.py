@@ -43,9 +43,15 @@ class DailyProductionConfig:
         self.PLANNING_BUFFER_DAYS = 14  # Buffer beyond latest order
         self.MAX_PLANNING_DAYS = 210  # ~7 months
 
-        # Compatibility attributes for weekly data loader
+        # Compatibility attributes for weekly data loader and parameter builder
         self.PLANNING_BUFFER_WEEKS = int(self.PLANNING_BUFFER_DAYS / 7)  # ~2 weeks
         self.MAX_PLANNING_WEEKS = int(self.MAX_PLANNING_DAYS / 7)  # ~30 weeks
+
+        # Lag attributes (set to 0 as we handle lead times in days directly)
+        self.COOLING_SHAKEOUT_LAG_WEEKS = 0
+        self.GRINDING_LAG_WEEKS = 0
+        self.MACHINING_LAG_WEEKS = 0
+        self.PAINTING_LAG_WEEKS = 0
 
         # Working schedule
         self.WORKING_DAYS_PER_WEEK = 6
