@@ -25,6 +25,9 @@ import io
 import tempfile
 import os
 import sys
+import hashlib
+import time
+import traceback
 
 # Import optimization modules
 from production_plan_test import (
@@ -210,82 +213,216 @@ def validate_uploaded_file(uploaded_file):
     return validation_results
 
 
-def run_optimization(uploaded_file, config):
-    """Run the optimization and return results."""
+def get_file_hash(uploaded_file):
+    """Generate a hash of the uploaded file for caching purposes."""
+    file_content = uploaded_file.getvalue()
+    return hashlib.md5(file_content).hexdigest()
+
+
+def get_config_hash(config_inputs):
+    """Generate a hash of the configuration for caching purposes."""
+    config_str = str(sorted(config_inputs.items()))
+    return hashlib.md5(config_str.encode()).hexdigest()
+
+
+class OptimizationError(Exception):
+    """Custom exception for optimization errors with detailed messages."""
+    def __init__(self, message, stage, details=None):
+        self.message = message
+        self.stage = stage
+        self.details = details or {}
+        super().__init__(self.message)
+
+
+def run_optimization_with_progress(uploaded_file, config, progress_callback=None):
+    """Run the optimization with progress tracking and detailed error handling.
+
+    Args:
+        uploaded_file: Uploaded Excel file
+        config: ProductionConfig object
+        progress_callback: Function to call with (progress_percent, status_message)
+
+    Returns:
+        Dictionary with all optimization results
+
+    Raises:
+        OptimizationError: With detailed error information
+    """
+    def update_progress(percent, message):
+        if progress_callback:
+            progress_callback(percent, message)
+
     # Save uploaded file to temp location
     with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
         tmp_file.write(uploaded_file.getvalue())
         tmp_path = tmp_file.name
 
     try:
-        # Load data
-        loader = ComprehensiveDataLoader(tmp_path, config)
-        data = loader.load_all_data()
+        # Stage 1: Load data (0-15%)
+        update_progress(5, "Loading master data from Excel...")
+        try:
+            loader = ComprehensiveDataLoader(tmp_path, config)
+            data = loader.load_all_data()
+        except Exception as e:
+            raise OptimizationError(
+                f"Failed to load data: {str(e)}",
+                "Data Loading",
+                {"hint": "Check that all required sheets exist and have correct column names"}
+            )
 
-        # Calculate demand with stage-wise skip logic
-        calculator = WIPDemandCalculator(data['sales_order'], data['stage_wip'], config)
-        (net_demand, stage_start_qty, wip_coverage,
-         gross_demand, wip_by_part) = calculator.calculate_net_demand_with_stages()
-        split_demand, part_week_mapping, variant_windows = calculator.split_demand_by_week(net_demand)
+        update_progress(15, f"Loaded {len(data.get('sales_order', []))} orders, {len(data.get('part_master', []))} parts")
 
-        # Build parameters
-        param_builder = ComprehensiveParameterBuilder(data['part_master'], config)
-        params = param_builder.build_parameters()
+        # Stage 2: Calculate demand (15-30%)
+        update_progress(20, "Calculating net demand with WIP adjustments...")
+        try:
+            calculator = WIPDemandCalculator(data['sales_order'], data['stage_wip'], config)
+            (net_demand, stage_start_qty, wip_coverage,
+             gross_demand, wip_by_part) = calculator.calculate_net_demand_with_stages()
+            split_demand, part_week_mapping, variant_windows = calculator.split_demand_by_week(net_demand)
+        except KeyError as e:
+            raise OptimizationError(
+                f"Missing required column: {str(e)}",
+                "Demand Calculation",
+                {"hint": f"Check that Sales Order and Stage WIP sheets have the required columns"}
+            )
+        except Exception as e:
+            raise OptimizationError(
+                f"Failed to calculate demand: {str(e)}",
+                "Demand Calculation",
+                {"hint": "Verify order quantities and WIP values are numeric"}
+            )
 
-        # Setup resources
-        machine_manager = MachineResourceManager(data['machine_constraints'], config)
-        box_manager = BoxCapacityManager(data['box_capacity'], config, machine_manager)
+        update_progress(30, f"Calculated demand for {len(split_demand)} part-week variants")
 
-        # Build WIP init
-        wip_init = build_wip_init(data['stage_wip'])
+        # Stage 3: Build parameters (30-40%)
+        update_progress(35, "Building part parameters and routing data...")
+        try:
+            param_builder = ComprehensiveParameterBuilder(data['part_master'], config)
+            params = param_builder.build_parameters()
+        except Exception as e:
+            raise OptimizationError(
+                f"Failed to build parameters: {str(e)}",
+                "Parameter Building",
+                {"hint": "Check Part Master for missing cycle times or resource codes"}
+            )
 
-        # Build and solve model
-        optimizer = ComprehensiveOptimizationModel(
-            split_demand,
-            part_week_mapping,
-            variant_windows,
-            params,
-            stage_start_qty,
-            machine_manager,
-            box_manager,
-            config,
-            wip_init=wip_init
-        )
-        status = optimizer.build_and_solve()
+        update_progress(40, f"Built parameters for {len(params)} parts")
 
-        # Extract results
-        analyzer = ComprehensiveResultsAnalyzer(
-            optimizer,
-            split_demand,
-            part_week_mapping,
-            params,
-            machine_manager,
-            box_manager,
-            config
-        )
-        results = analyzer.extract_all_results()
+        # Stage 4: Setup resources (40-50%)
+        update_progress(45, "Setting up machine and capacity resources...")
+        try:
+            machine_manager = MachineResourceManager(data['machine_constraints'], config)
+            box_manager = BoxCapacityManager(data['box_capacity'], config, machine_manager)
+            wip_init = build_wip_init(data['stage_wip'])
+        except Exception as e:
+            raise OptimizationError(
+                f"Failed to setup resources: {str(e)}",
+                "Resource Setup",
+                {"hint": "Check Machine Constraints and Mould Box Capacity sheets"}
+            )
 
-        # Generate fulfillment reports
-        fulfillment_analyzer = ShipmentFulfillmentAnalyzer(
-            optimizer,
-            data['sales_order'],
-            split_demand,
-            part_week_mapping,
-            params,
-            config,
-            data,
-            wip_by_part
-        )
-        fulfillment_reports = fulfillment_analyzer.generate_all_fulfillment_reports()
+        update_progress(50, "Resource constraints initialized")
 
-        # Generate daily schedule
-        daily_generator = DailyScheduleGenerator(
-            results['weekly_summary'],
-            results,
-            config
-        )
-        daily_schedule = daily_generator.generate_daily_schedule()
-        part_daily_schedule = daily_generator.generate_part_level_daily_schedule(data['part_master'])
+        # Stage 5: Build and solve model (50-80%)
+        update_progress(55, "Building optimization model...")
+        try:
+            optimizer = ComprehensiveOptimizationModel(
+                split_demand,
+                part_week_mapping,
+                variant_windows,
+                params,
+                stage_start_qty,
+                machine_manager,
+                box_manager,
+                config,
+                wip_init=wip_init
+            )
+        except Exception as e:
+            raise OptimizationError(
+                f"Failed to build model: {str(e)}",
+                "Model Building",
+                {"hint": "There may be inconsistencies between parts and constraints"}
+            )
+
+        update_progress(65, "Solving optimization model (this may take a while)...")
+        try:
+            status = optimizer.build_and_solve()
+        except Exception as e:
+            raise OptimizationError(
+                f"Solver failed: {str(e)}",
+                "Optimization Solving",
+                {"hint": "The problem may be infeasible. Try adjusting constraints or capacity."}
+            )
+
+        if status != pulp.LpStatusOptimal:
+            status_name = pulp.LpStatus.get(status, "Unknown")
+            raise OptimizationError(
+                f"Optimization did not find optimal solution. Status: {status_name}",
+                "Optimization Solving",
+                {"status": status_name, "hint": "Try increasing capacity or adjusting penalties"}
+            )
+
+        update_progress(80, "Optimization complete, extracting results...")
+
+        # Stage 6: Extract results (80-90%)
+        try:
+            analyzer = ComprehensiveResultsAnalyzer(
+                optimizer,
+                split_demand,
+                part_week_mapping,
+                params,
+                machine_manager,
+                box_manager,
+                config
+            )
+            results = analyzer.extract_all_results()
+        except Exception as e:
+            raise OptimizationError(
+                f"Failed to extract results: {str(e)}",
+                "Results Extraction",
+                {"hint": "The model solved but results extraction failed"}
+            )
+
+        update_progress(85, "Generating fulfillment reports...")
+
+        # Stage 7: Generate reports (90-100%)
+        try:
+            fulfillment_analyzer = ShipmentFulfillmentAnalyzer(
+                optimizer,
+                data['sales_order'],
+                split_demand,
+                part_week_mapping,
+                params,
+                config,
+                data,
+                wip_by_part
+            )
+            fulfillment_reports = fulfillment_analyzer.generate_all_fulfillment_reports()
+        except Exception as e:
+            raise OptimizationError(
+                f"Failed to generate fulfillment reports: {str(e)}",
+                "Fulfillment Analysis",
+                {"hint": "Results were extracted but fulfillment analysis failed"}
+            )
+
+        update_progress(92, "Generating daily schedules...")
+
+        try:
+            daily_generator = DailyScheduleGenerator(
+                results['weekly_summary'],
+                results,
+                config
+            )
+            daily_schedule = daily_generator.generate_daily_schedule()
+            part_daily_schedule = daily_generator.generate_part_level_daily_schedule(data['part_master'])
+        except Exception as e:
+            raise OptimizationError(
+                f"Failed to generate daily schedule: {str(e)}",
+                "Schedule Generation",
+                {"hint": "Weekly results are available but daily breakdown failed"}
+            )
+
+        update_progress(100, "Optimization completed successfully!")
 
         # Compile all results
         all_results = {
@@ -300,14 +437,21 @@ def run_optimization(uploaded_file, config):
             'part_week_mapping': part_week_mapping,
             'variant_windows': variant_windows,
             'stage_start_qty': stage_start_qty,
-            'wip_init': wip_init
+            'wip_init': wip_init,
+            'timestamp': datetime.now().isoformat()
         }
 
         return all_results
 
     finally:
         # Cleanup temp file
-        os.unlink(tmp_path)
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def run_optimization(uploaded_file, config):
+    """Legacy wrapper for backward compatibility."""
+    return run_optimization_with_progress(uploaded_file, config)
 
 
 def create_kpi_dashboard(results, fulfillment_reports):
@@ -845,37 +989,119 @@ def main():
 
         config = create_config_from_inputs(config_inputs)
 
-        with st.spinner("Running optimization... This may take a few minutes."):
-            try:
-                # Progress indicator
+        # Check for cached results
+        file_hash = get_file_hash(uploaded_file)
+        config_hash = get_config_hash(config_inputs)
+        cache_key = f"{file_hash}_{config_hash}"
+
+        # Check if we have cached results for this exact configuration
+        if (st.session_state.get('cache_key') == cache_key and
+            st.session_state.get('optimization_complete', False)):
+            st.info("Using cached results. Click 'Run Optimization' again with different settings to re-run.")
+        else:
+            # Create progress tracking UI
+            progress_container = st.container()
+            with progress_container:
                 progress_bar = st.progress(0)
                 status_text = st.empty()
+                stage_info = st.empty()
 
-                status_text.text("Loading data...")
-                progress_bar.progress(10)
+                start_time = time.time()
 
-                # Run optimization
-                all_results = run_optimization(uploaded_file, config)
+                def progress_callback(percent, message):
+                    """Update progress UI with current status."""
+                    progress_bar.progress(percent / 100)
+                    elapsed = time.time() - start_time
+                    status_text.markdown(f"**{message}**")
+                    if percent < 100:
+                        stage_info.text(f"Elapsed: {elapsed:.1f}s")
+                    else:
+                        stage_info.text(f"Total time: {elapsed:.1f}s")
 
-                progress_bar.progress(100)
-                status_text.text("Optimization complete!")
+                try:
+                    # Run optimization with progress tracking
+                    all_results = run_optimization_with_progress(
+                        uploaded_file,
+                        config,
+                        progress_callback
+                    )
 
-                # Store results in session state
-                st.session_state['optimization_results'] = all_results
-                st.session_state['optimization_complete'] = True
+                    # Store results in session state with cache key
+                    st.session_state['optimization_results'] = all_results
+                    st.session_state['optimization_complete'] = True
+                    st.session_state['cache_key'] = cache_key
+                    st.session_state['last_run_time'] = datetime.now().isoformat()
 
-                st.success("✅ Optimization completed successfully!")
-                st.rerun()
+                    # Show success message
+                    elapsed = time.time() - start_time
+                    st.success(f"Optimization completed successfully in {elapsed:.1f} seconds!")
 
-            except Exception as e:
-                st.error(f"❌ Error during optimization: {str(e)}")
-                st.exception(e)
+                    # Clear progress UI and rerun to show results
+                    time.sleep(0.5)
+                    st.rerun()
+
+                except OptimizationError as e:
+                    # Handle custom optimization errors with detailed feedback
+                    st.error(f"Optimization failed at stage: **{e.stage}**")
+                    st.error(f"{e.message}")
+
+                    if e.details.get('hint'):
+                        st.warning(f"**Suggestion:** {e.details['hint']}")
+
+                    with st.expander("Technical Details"):
+                        st.code(traceback.format_exc())
+
+                    # Clear incomplete results
+                    st.session_state['optimization_complete'] = False
+                    st.session_state.pop('optimization_results', None)
+                    st.session_state.pop('cache_key', None)
+
+                except Exception as e:
+                    # Handle unexpected errors
+                    st.error(f"Unexpected error during optimization")
+                    st.error(str(e))
+
+                    with st.expander("Error Details"):
+                        st.code(traceback.format_exc())
+
+                    st.warning("""
+                    **Common issues:**
+                    - Missing required columns in Excel sheets
+                    - Invalid data types (text where numbers expected)
+                    - Missing Part Master entries for ordered parts
+                    - Insufficient capacity for demand
+                    """)
+
+                    # Clear incomplete results
+                    st.session_state['optimization_complete'] = False
+                    st.session_state.pop('optimization_results', None)
+                    st.session_state.pop('cache_key', None)
 
     # Display results if available
     if st.session_state.get('optimization_complete', False):
         all_results = st.session_state['optimization_results']
         results = all_results['results']
         fulfillment_reports = all_results['fulfillment_reports']
+
+        # Show run information
+        last_run = st.session_state.get('last_run_time', '')
+        if last_run:
+            try:
+                run_dt = datetime.fromisoformat(last_run)
+                run_str = run_dt.strftime("%Y-%m-%d %H:%M:%S")
+            except:
+                run_str = last_run
+
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.caption(f"Last optimization run: {run_str}")
+            with col2:
+                if st.button("Clear Results", type="secondary", key="clear_results"):
+                    st.session_state['optimization_complete'] = False
+                    st.session_state.pop('optimization_results', None)
+                    st.session_state.pop('cache_key', None)
+                    st.session_state.pop('last_run_time', None)
+                    st.rerun()
 
         # Results tabs
         tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
