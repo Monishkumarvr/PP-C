@@ -507,10 +507,10 @@ class DailyExecutiveReportGenerator:
                            f'{capacity:.1f}', f'{avg_util:.1f}%', f'{peak_util:.1f}%'])
                 stage_info.append((stage_name, cap_key))
 
-        # Daily utilization section
+        # Daily utilization section (Units/Tons based)
         rows.append([''])
         rows.append([''])
-        rows.append(['DAILY UTILIZATION % BY STAGE'])
+        rows.append(['DAILY UTILIZATION % BY STAGE (Units/Tons Based)'])
         rows.append([''])
 
         # Header row
@@ -537,6 +537,73 @@ class DailyExecutiveReportGenerator:
                 util = (load / capacity * 100) if capacity > 0 else 0
 
                 data_row.append(f'{load:.1f}')
+                data_row.append(f'{util:.1f}%')
+
+            rows.append(data_row)
+
+        # Hour-based utilization section
+        rows.append([''])
+        rows.append([''])
+        rows.append(['DAILY UTILIZATION % BY STAGE (Hours Based)'])
+        rows.append([''])
+
+        # Define available hours per day for each stage
+        # Default: 12 hrs/shift * 2 shifts * 0.90 OEE = 21.6 hrs/day
+        available_hours_daily = {
+            'Casting': 21.6,
+            'Big Line': 21.6,
+            'Small Line': 21.6,
+            'Grinding': 21.6,
+            'MC1': 21.6,
+            'MC2': 21.6,
+            'MC3': 21.6,
+            'SP1': 21.6,
+            'SP2': 21.6,
+            'SP3': 21.6
+        }
+
+        # Summary section for hour-based utilization
+        rows.append(['Stage', 'Total Hours', 'Daily Avg Hours', 'Peak Hours', 'Available Hrs/Day', 'Avg Util %', 'Peak Util %'])
+
+        stage_hours_info = []
+        for stage_name in ['Casting', 'Big Line', 'Small Line', 'Grinding', 'MC1', 'MC2', 'MC3', 'SP1', 'SP2', 'SP3']:
+            hours_key = f'{stage_name.replace(" ", "_")}_Hours'
+            if hours_key in daily_summary.columns:
+                total_hrs = daily_summary[hours_key].sum()
+                avg_hrs = daily_summary[hours_key].mean()
+                peak_hrs = daily_summary[hours_key].max()
+                available = available_hours_daily.get(stage_name, 21.6)
+                avg_util = (avg_hrs / available * 100) if available > 0 else 0
+                peak_util = (peak_hrs / available * 100) if available > 0 else 0
+
+                rows.append([stage_name, f'{total_hrs:.1f}', f'{avg_hrs:.1f}', f'{peak_hrs:.1f}',
+                           f'{available:.1f}', f'{avg_util:.1f}%', f'{peak_util:.1f}%'])
+                stage_hours_info.append((stage_name, hours_key))
+
+        # Daily hour-based utilization
+        rows.append([''])
+        rows.append(['Date', 'Day'] + [f'{s} Hrs' for s, _ in stage_hours_info] + [f'{s} Util %' for s, _ in stage_hours_info])
+
+        for _, row in daily_summary.iterrows():
+            date = row.get('Date')
+            if pd.isna(date):
+                continue
+
+            date_str = date.strftime('%Y-%m-%d') if isinstance(date, datetime) else str(date)
+            day_name = date.strftime('%A') if isinstance(date, datetime) else 'N/A'
+
+            data_row = [date_str, day_name]
+
+            # Add hours first
+            for stage_name, hours_key in stage_hours_info:
+                hours = row.get(hours_key, 0)
+                data_row.append(f'{hours:.1f}')
+
+            # Then add utilization %
+            for stage_name, hours_key in stage_hours_info:
+                hours = row.get(hours_key, 0)
+                available = available_hours_daily.get(stage_name, 21.6)
+                util = (hours / available * 100) if available > 0 else 0
                 data_row.append(f'{util:.1f}%')
 
             rows.append(data_row)

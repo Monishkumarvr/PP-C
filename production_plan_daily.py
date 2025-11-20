@@ -752,6 +752,41 @@ class DailyResultsAnalyzer:
                 big_line_tons = dc[dc['Moulding_Line'].str.contains('Big Line', case=False, na=False)]['Total_Weight_ton'].sum()
                 small_line_tons = dc[dc['Moulding_Line'].str.contains('Small Line', case=False, na=False)]['Total_Weight_ton'].sum()
 
+            # Calculate hours for each stage using cycle times
+            def calc_hours(stage_df, cycle_key):
+                """Calculate total hours for a stage using cycle times from params."""
+                hours = 0.0
+                if len(stage_df) > 0 and 'Part' in stage_df.columns and 'Units' in stage_df.columns:
+                    for _, row in stage_df.iterrows():
+                        part = row['Part']
+                        units = row['Units']
+                        cycle_min = self.params.get(part, {}).get(cycle_key, 0)
+                        hours += units * cycle_min / 60.0
+                return hours
+
+            casting_hours = calc_hours(dc, 'casting_cycle')
+            grinding_hours = calc_hours(dg, 'grinding_cycle')
+            mc1_hours = calc_hours(dm1, 'mc1_cycle')
+            mc2_hours = calc_hours(dm2, 'mc2_cycle')
+            mc3_hours = calc_hours(dm3, 'mc3_cycle')
+            sp1_hours = calc_hours(ds1, 'sp1_cycle')
+            sp2_hours = calc_hours(ds2, 'sp2_cycle')
+            sp3_hours = calc_hours(ds3, 'sp3_cycle')
+
+            # Calculate Big Line and Small Line hours separately
+            big_line_hours = 0.0
+            small_line_hours = 0.0
+            if len(dc) > 0 and 'Moulding_Line' in dc.columns:
+                for _, row in dc.iterrows():
+                    part = row['Part']
+                    units = row['Units']
+                    cycle_min = self.params.get(part, {}).get('casting_cycle', 0)
+                    hours = units * cycle_min / 60.0
+                    if 'Big Line' in row.get('Moulding_Line', ''):
+                        big_line_hours += hours
+                    elif 'Small Line' in row.get('Moulding_Line', ''):
+                        small_line_hours += hours
+
             daily_data.append({
                 'Date': d,
                 'Day': d.strftime('%A'),
@@ -767,7 +802,18 @@ class DailyResultsAnalyzer:
                 'SP1_Units': ds1['Units'].sum() if 'Units' in ds1.columns else 0,
                 'SP2_Units': ds2['Units'].sum() if 'Units' in ds2.columns else 0,
                 'SP3_Units': ds3['Units'].sum() if 'Units' in ds3.columns else 0,
-                'Delivery_Units': dd['Units'].sum() if 'Units' in dd.columns else 0
+                'Delivery_Units': dd['Units'].sum() if 'Units' in dd.columns else 0,
+                # Add hours for each stage
+                'Casting_Hours': round(casting_hours, 2),
+                'Big_Line_Hours': round(big_line_hours, 2),
+                'Small_Line_Hours': round(small_line_hours, 2),
+                'Grinding_Hours': round(grinding_hours, 2),
+                'MC1_Hours': round(mc1_hours, 2),
+                'MC2_Hours': round(mc2_hours, 2),
+                'MC3_Hours': round(mc3_hours, 2),
+                'SP1_Hours': round(sp1_hours, 2),
+                'SP2_Hours': round(sp2_hours, 2),
+                'SP3_Hours': round(sp3_hours, 2)
             })
 
         return pd.DataFrame(daily_data)
@@ -775,22 +821,22 @@ class DailyResultsAnalyzer:
     def _aggregate_to_weekly(self, daily_summary):
         """Aggregate daily summary to weekly for reporting compatibility."""
         print("\n✓ Aggregating to weekly summary...")
-        
+
         weekly_data = []
-        
+
         # Group by week
         for week_num in range(1, self.config.PLANNING_DAYS // 7 + 2):
             week_start = self.config.CURRENT_DATE + timedelta(weeks=week_num - 1)
             week_end = week_start + timedelta(days=6)
-            
+
             week_days = daily_summary[
-                (daily_summary['Date'] >= week_start) & 
+                (daily_summary['Date'] >= week_start) &
                 (daily_summary['Date'] <= week_end)
             ]
-            
+
             if len(week_days) == 0:
                 continue
-            
+
             weekly_data.append({
                 'Week': week_num,
                 'Casting_Tons': week_days['Casting_Tons'].sum(),
@@ -804,9 +850,20 @@ class DailyResultsAnalyzer:
                 'SP1_Units': week_days['SP1_Units'].sum(),
                 'SP2_Units': week_days['SP2_Units'].sum(),
                 'SP3_Units': week_days['SP3_Units'].sum(),
-                'Delivery_Units': week_days['Delivery_Units'].sum()
+                'Delivery_Units': week_days['Delivery_Units'].sum(),
+                # Add hours aggregation
+                'Casting_Hours': week_days['Casting_Hours'].sum(),
+                'Big_Line_Hours': week_days['Big_Line_Hours'].sum(),
+                'Small_Line_Hours': week_days['Small_Line_Hours'].sum(),
+                'Grinding_Hours': week_days['Grinding_Hours'].sum(),
+                'MC1_Hours': week_days['MC1_Hours'].sum(),
+                'MC2_Hours': week_days['MC2_Hours'].sum(),
+                'MC3_Hours': week_days['MC3_Hours'].sum(),
+                'SP1_Hours': week_days['SP1_Hours'].sum(),
+                'SP2_Hours': week_days['SP2_Hours'].sum(),
+                'SP3_Hours': week_days['SP3_Hours'].sum()
             })
-        
+
         return pd.DataFrame(weekly_data)
     
     def _analyze_fulfillment(self):
