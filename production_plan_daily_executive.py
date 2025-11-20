@@ -161,6 +161,9 @@ class DailyExecutiveReportGenerator:
             'SP3_Units': 85
         }
 
+        # Available hours per day per stage (will be calculated from machine constraints)
+        self.available_hours_per_stage = None
+
     def load_detailed_data(self):
         """Load data from comprehensive daily output file"""
         print("\n📂 Loading daily optimization results...")
@@ -227,6 +230,88 @@ class DailyExecutiveReportGenerator:
                     self.capacity_limits_daily[stage] = max(default_cap, int(actual_max * 1.1))
 
         print(f"     ✓ Updated capacity limits for daily tracking")
+
+        # Calculate available hours from machine constraints
+        self._calculate_available_hours()
+
+    def _calculate_available_hours(self):
+        """Calculate available hours per day for each stage from machine constraints"""
+        if not self.master_data_path:
+            print("     ⚠ No master data path, using default 21.6 hrs/day for all stages")
+            self.available_hours_per_stage = {
+                'Casting': 21.6, 'Big Line': 21.6, 'Small Line': 21.6,
+                'Grinding': 21.6, 'MC1': 21.6, 'MC2': 21.6, 'MC3': 21.6,
+                'SP1': 21.6, 'SP2': 21.6, 'SP3': 21.6
+            }
+            return
+
+        try:
+            # Read machine constraints
+            machine_df = pd.read_excel(self.master_data_path, sheet_name='Machine Constraints')
+
+            # OEE factor
+            OEE = 0.90
+
+            # Calculate hours for each resource
+            # Hours = No_Of_Resource × Available_Hours_per_Day × No_of_Shift × OEE
+            machine_df['Total_Hours_Daily'] = (
+                machine_df['No Of Resource'].fillna(0) *
+                machine_df['Available Hours per Day'].fillna(0) *
+                machine_df['No of Shift'].fillna(1) *
+                OEE
+            )
+
+            # Map resources to stages
+            # Casting: Big/Small Vacuum lines
+            casting_resources = machine_df[machine_df['Operation Name'] == 'Casting']
+            big_line = casting_resources[casting_resources['Resource Name'].str.contains('Big', case=False, na=False)]['Total_Hours_Daily'].sum()
+            small_line = casting_resources[casting_resources['Resource Name'].str.contains('Small', case=False, na=False)]['Total_Hours_Daily'].sum()
+            casting_total = big_line + small_line
+
+            # Grinding: Hand Grinding
+            grinding = machine_df[machine_df['Operation Name'].str.contains('Grinding', case=False, na=False)]['Total_Hours_Daily'].sum()
+
+            # Machining: All machining resources (we'll use total for all MC stages for now)
+            machining = machine_df[machine_df['Operation Name'].str.contains('Machining', case=False, na=False)]['Total_Hours_Daily'].sum()
+
+            # Painting: Map specific booths to stages
+            painting_df = machine_df[machine_df['Operation Name'].str.contains('Special Painting', case=False, na=False)]
+
+            # SP1 (Primer): Both primer booths (First coat + Final Primer)
+            sp1_hrs = painting_df[painting_df['Resource Name'].str.contains('Primer', case=False, na=False)]['Total_Hours_Daily'].sum()
+
+            # SP2: Reuse primer booths (shared capacity)
+            sp2_hrs = sp1_hrs
+
+            # SP3 (Top Coat): Top coat booth
+            sp3_hrs = painting_df[painting_df['Resource Name'].str.contains('Top Coat', case=False, na=False)]['Total_Hours_Daily'].sum()
+
+            self.available_hours_per_stage = {
+                'Casting': max(casting_total, 21.6),
+                'Big Line': max(big_line, 21.6),
+                'Small Line': max(small_line, 21.6),
+                'Grinding': max(grinding, 21.6),
+                'MC1': max(machining, 21.6),  # All machining resources shared
+                'MC2': max(machining, 21.6),
+                'MC3': max(machining, 21.6),
+                'SP1': max(sp1_hrs, 36.0),  # 2 primer booths
+                'SP2': max(sp2_hrs, 36.0),  # Reuses primer booths
+                'SP3': max(sp3_hrs, 36.0)   # 1 top coat booth
+            }
+
+            print(f"     ✓ Calculated available hours from machine constraints")
+            print(f"        Casting: {casting_total:.1f} hrs/day, Grinding: {grinding:.1f} hrs/day")
+            print(f"        Machining: {machining:.1f} hrs/day")
+            print(f"        Painting: SP1={sp1_hrs:.1f}, SP2={sp2_hrs:.1f}, SP3={sp3_hrs:.1f} hrs/day")
+
+        except Exception as e:
+            print(f"     ⚠ Error loading machine constraints: {e}")
+            print(f"     ⚠ Using default 21.6 hrs/day for all stages")
+            self.available_hours_per_stage = {
+                'Casting': 21.6, 'Big Line': 21.6, 'Small Line': 21.6,
+                'Grinding': 21.6, 'MC1': 21.6, 'MC2': 21.6, 'MC3': 21.6,
+                'SP1': 21.6, 'SP2': 21.6, 'SP3': 21.6
+            }
 
     def create_executive_dashboard(self):
         """Create executive dashboard with KPIs"""
@@ -547,19 +632,11 @@ class DailyExecutiveReportGenerator:
         rows.append(['DAILY UTILIZATION % BY STAGE (Hours Based)'])
         rows.append([''])
 
-        # Define available hours per day for each stage
-        # Default: 12 hrs/shift * 2 shifts * 0.90 OEE = 21.6 hrs/day
-        available_hours_daily = {
-            'Casting': 21.6,
-            'Big Line': 21.6,
-            'Small Line': 21.6,
-            'Grinding': 21.6,
-            'MC1': 21.6,
-            'MC2': 21.6,
-            'MC3': 21.6,
-            'SP1': 21.6,
-            'SP2': 21.6,
-            'SP3': 21.6
+        # Use calculated available hours from machine constraints
+        available_hours_daily = self.available_hours_per_stage if self.available_hours_per_stage else {
+            'Casting': 21.6, 'Big Line': 21.6, 'Small Line': 21.6,
+            'Grinding': 21.6, 'MC1': 21.6, 'MC2': 21.6, 'MC3': 21.6,
+            'SP1': 21.6, 'SP2': 21.6, 'SP3': 21.6
         }
 
         # Summary section for hour-based utilization
