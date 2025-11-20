@@ -953,7 +953,8 @@ def main():
                 earliest = summary['earliest_date']
                 latest = summary['latest_date']
                 if pd.notna(earliest) and pd.notna(latest):
-                    date_range = f"{earliest.strftime('%m/%d')} - {latest.strftime('%m/%d')}"
+                    # Show full date format with year for clarity
+                    date_range = f"{earliest.strftime('%d %b %Y')} - {latest.strftime('%d %b %Y')}"
                 else:
                     date_range = "N/A"
             else:
