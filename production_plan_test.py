@@ -153,6 +153,42 @@ class ProductionCalendar:
 
         return daily_allocation
 
+    def get_nearest_working_day(self, target_date):
+        """Find nearest working day to target date."""
+        # Try target date first
+        if self.is_working_day(target_date):
+            return target_date
+
+        # Search forward and backward
+        for offset in range(1, 15):  # Search up to 2 weeks
+            # Try forward
+            forward_date = target_date + timedelta(days=offset)
+            if self.is_working_day(forward_date):
+                return forward_date
+
+            # Try backward
+            backward_date = target_date - timedelta(days=offset)
+            if self.is_working_day(backward_date):
+                return backward_date
+
+        # Fallback (should never happen)
+        return target_date
+
+    def get_all_working_days(self, num_days):
+        """Get all working days for planning horizon."""
+        working_days = []
+        current_date = self.config.CURRENT_DATE
+
+        for day_offset in range(num_days + 30):  # Add buffer
+            date = current_date + timedelta(days=day_offset)
+            if self.is_working_day(date):
+                working_days.append(date)
+
+            if len(working_days) >= num_days:
+                break
+
+        return working_days
+
 
 class DailyScheduleGenerator:
     """Generate daily-level production schedules from weekly plans"""
