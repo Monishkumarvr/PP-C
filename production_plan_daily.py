@@ -99,6 +99,10 @@ class DailyProductionConfig:
         self.MAX_EARLY_DAYS = 56  # 8 weeks × 7 days (allow up to 8 weeks early delivery)
         self.SETUP_PENALTY = 5
 
+        # Hybrid PUSH-PULL parameters
+        self.WIP_INVENTORY_COST_PER_DAY = 0.05  # Cost to hold WIP inventory per unit per day
+        self.IDLE_CAPACITY_PENALTY = 0  # Set to 0 for now (can enable later)
+
         # Penalty compatibility (weekly equivalents for existing code)
         self.LATENESS_PENALTY = 150000  # Per week late (for compatibility)
         self.INVENTORY_HOLDING_COST = 1  # Per unit per week (for compatibility)
@@ -212,8 +216,12 @@ class DailyOptimizationModel:
         self.x_delivery = {}
         self.x_unmet = {}
 
-        # Note: Removed inventory stage tracking (not constrained, cost now based on delivery timing)
-        # Note: Removed x_late_days (lateness calculated directly in objective like weekly optimizer)
+        # Hybrid PUSH-PULL: Inventory tracking variables (by part, not variant)
+        self.inv_cs = {}  # CS inventory (casting + CS WIP)
+        self.inv_gr = {}  # GR inventory (ground parts)
+        self.inv_mc = {}  # MC inventory (machined parts)
+        self.inv_sp = {}  # SP inventory (painted parts)
+        self.inv_fg = {}  # FG inventory (finished goods)
     
     def build_and_solve(self):
         """Build complete model and solve."""
@@ -228,6 +236,7 @@ class DailyOptimizationModel:
         self._add_objective_function()
         self._add_capacity_constraints()
         self._add_box_constraints()
+        self._add_inventory_balance_constraints()  # NEW: Hybrid PUSH-PULL inventory tracking
         self._add_flow_constraints()
         self._add_demand_constraints()
 
@@ -322,10 +331,28 @@ class DailyOptimizationModel:
         for v in variants:
             self.x_unmet[v] = pulp.LpVariable(f"unmet_{v}", 0, None)
 
-        # Note: Removed inventory stage variables (inv_cs, inv_gr, etc.) since they weren't constrained
-        # Note: Removed x_late_days variable - lateness calculated directly in objective like weekly optimizer
+        # Hybrid PUSH-PULL: Create inventory tracking variables (by PART, not variant)
+        parts = set(part for part, _ in self.part_day_mapping.values())
+        for part in parts:
+            for d in days:
+                # Inventory at each stage
+                self.inv_cs[(part, d)] = pulp.LpVariable(
+                    f"inv_cs_{part}_{d.strftime('%Y%m%d')}", 0, None, cat='Continuous'
+                )
+                self.inv_gr[(part, d)] = pulp.LpVariable(
+                    f"inv_gr_{part}_{d.strftime('%Y%m%d')}", 0, None, cat='Continuous'
+                )
+                self.inv_mc[(part, d)] = pulp.LpVariable(
+                    f"inv_mc_{part}_{d.strftime('%Y%m%d')}", 0, None, cat='Continuous'
+                )
+                self.inv_sp[(part, d)] = pulp.LpVariable(
+                    f"inv_sp_{part}_{d.strftime('%Y%m%d')}", 0, None, cat='Continuous'
+                )
+                self.inv_fg[(part, d)] = pulp.LpVariable(
+                    f"inv_fg_{part}_{d.strftime('%Y%m%d')}", 0, None, cat='Continuous'
+                )
 
-        print(f"  ✓ Created decision variables")
+        print(f"  ✓ Created decision variables (including {len(parts) * len(days) * 5} inventory variables)")
     
     def _add_objective_function(self):
         """Add objective: minimize cost (matching weekly optimizer logic exactly)."""
@@ -363,8 +390,20 @@ class DailyOptimizationModel:
                         self.config.INVENTORY_HOLDING_COST_PER_DAY * excess_early_days * self.x_delivery[(v, d)]
                     )
 
+        # Hybrid PUSH-PULL: WIP inventory holding cost (encourages processing WIP but not too much)
+        parts = set(part for part, _ in self.part_day_mapping.values())
+        for part in parts:
+            for d in self.working_days:
+                # Small cost to hold WIP inventory (allows speculative processing but penalizes excess)
+                objective_terms.append(
+                    self.config.WIP_INVENTORY_COST_PER_DAY * (
+                        self.inv_cs[(part, d)] + self.inv_gr[(part, d)] +
+                        self.inv_mc[(part, d)] + self.inv_sp[(part, d)]
+                    )
+                )
+
         self.model += pulp.lpSum(objective_terms), "Total_Cost"
-        print("  ✓ Objective function added (lateness + inventory costs, matching weekly logic)")
+        print("  ✓ Objective function added (unmet + lateness + FG inventory + WIP inventory)")
     
     def _add_capacity_constraints(self):
         """Add daily capacity constraints for all resources."""
@@ -482,6 +521,134 @@ class DailyOptimizationModel:
                     constraints_added += 1
 
         print(f"  ✓ Added {constraints_added} mould box capacity constraints")
+
+    def _add_inventory_balance_constraints(self):
+        """Add inventory balance constraints for hybrid PUSH-PULL system."""
+        print("\n📦 Adding inventory balance constraints (Hybrid PUSH-PULL)...")
+
+        parts = set(part for part, _ in self.part_day_mapping.values())
+        variants_by_part = defaultdict(list)
+        for v in self.daily_demand.keys():
+            part, _ = self.part_day_mapping[v]
+            variants_by_part[part].append(v)
+
+        constraints_added = 0
+
+        for part in parts:
+            if part not in self.params:
+                continue
+
+            p = self.params[part]
+            wip = self.wip_init.get(part, {'FG': 0, 'SP': 0, 'MC': 0, 'GR': 0, 'CS': 0})
+            variants = variants_by_part[part]
+
+            for d_idx, d in enumerate(self.working_days):
+                # Aggregate production for this part across all variants
+                casting_total = pulp.lpSum(self.x_casting[(v, d)] for v in variants)
+                grinding_total = pulp.lpSum(self.x_grinding[(v, d)] for v in variants)
+                mc1_total = pulp.lpSum(self.x_mc1[(v, d)] for v in variants if isinstance(self.x_mc1.get((v, d)), pulp.LpVariable))
+                mc2_total = pulp.lpSum(self.x_mc2[(v, d)] for v in variants if isinstance(self.x_mc2.get((v, d)), pulp.LpVariable))
+                mc3_total = pulp.lpSum(self.x_mc3[(v, d)] for v in variants if isinstance(self.x_mc3.get((v, d)), pulp.LpVariable))
+                sp1_total = pulp.lpSum(self.x_sp1[(v, d)] for v in variants if isinstance(self.x_sp1.get((v, d)), pulp.LpVariable))
+                sp2_total = pulp.lpSum(self.x_sp2[(v, d)] for v in variants if isinstance(self.x_sp2.get((v, d)), pulp.LpVariable))
+                sp3_total = pulp.lpSum(self.x_sp3[(v, d)] for v in variants if isinstance(self.x_sp3.get((v, d)), pulp.LpVariable))
+                delivery_total = pulp.lpSum(self.x_delivery[(v, d)] for v in variants)
+
+                # Initial inventory (first day)
+                if d_idx == 0:
+                    # CS Inventory Balance: inv_cs[d] = CS_WIP + casting[d] - grinding[d]
+                    self.model += (
+                        self.inv_cs[(part, d)] == wip['CS'] + casting_total - grinding_total,
+                        f"InvBal_CS_{part}_D{d_idx}"
+                    )
+                    constraints_added += 1
+
+                    # GR Inventory Balance: inv_gr[d] = GR_WIP + grinding[d] - mc1[d]
+                    self.model += (
+                        self.inv_gr[(part, d)] == wip['GR'] + grinding_total - mc1_total,
+                        f"InvBal_GR_{part}_D{d_idx}"
+                    )
+                    constraints_added += 1
+
+                    # MC Inventory Balance: inv_mc[d] = MC_WIP + (mc1+mc2+mc3)[d] - sp1[d]
+                    mc_output = mc1_total + mc2_total + mc3_total
+                    self.model += (
+                        self.inv_mc[(part, d)] == wip['MC'] + mc_output - sp1_total,
+                        f"InvBal_MC_{part}_D{d_idx}"
+                    )
+                    constraints_added += 1
+
+                    # SP Inventory Balance: inv_sp[d] = SP_WIP + (sp1+sp2+sp3)[d] - finished[d]
+                    # Finished goods come from last SP stage
+                    if p.get('has_sp3', True):
+                        sp_output = sp3_total
+                    elif p.get('has_sp2', True):
+                        sp_output = sp2_total
+                    else:
+                        sp_output = sp1_total
+
+                    self.model += (
+                        self.inv_sp[(part, d)] == wip['SP'] + sp1_total + sp2_total + sp3_total - sp_output,
+                        f"InvBal_SP_{part}_D{d_idx}"
+                    )
+                    constraints_added += 1
+
+                    # FG Inventory Balance: inv_fg[d] = FG_WIP + finished[d] - delivery[d]
+                    self.model += (
+                        self.inv_fg[(part, d)] == wip['FG'] + sp_output - delivery_total,
+                        f"InvBal_FG_{part}_D{d_idx}"
+                    )
+                    constraints_added += 1
+
+                else:
+                    # Subsequent days: inv[d] = inv[d-1] + inflow[d] - outflow[d]
+                    prev_d = self.working_days[d_idx - 1]
+
+                    # CS: inv_cs[d] = inv_cs[d-1] + casting[d] - grinding[d]
+                    self.model += (
+                        self.inv_cs[(part, d)] == self.inv_cs[(part, prev_d)] + casting_total - grinding_total,
+                        f"InvBal_CS_{part}_D{d_idx}"
+                    )
+                    constraints_added += 1
+
+                    # GR: inv_gr[d] = inv_gr[d-1] + grinding[d] - mc1[d]
+                    self.model += (
+                        self.inv_gr[(part, d)] == self.inv_gr[(part, prev_d)] + grinding_total - mc1_total,
+                        f"InvBal_GR_{part}_D{d_idx}"
+                    )
+                    constraints_added += 1
+
+                    # MC: inv_mc[d] = inv_mc[d-1] + mc_output[d] - sp1[d]
+                    mc_output = mc1_total + mc2_total + mc3_total
+                    self.model += (
+                        self.inv_mc[(part, d)] == self.inv_mc[(part, prev_d)] + mc_output - sp1_total,
+                        f"InvBal_MC_{part}_D{d_idx}"
+                    )
+                    constraints_added += 1
+
+                    # SP: inv_sp[d] = inv_sp[d-1] + sp_input[d] - sp_output[d]
+                    if p.get('has_sp3', True):
+                        sp_output = sp3_total
+                    elif p.get('has_sp2', True):
+                        sp_output = sp2_total
+                    else:
+                        sp_output = sp1_total
+
+                    self.model += (
+                        self.inv_sp[(part, d)] == self.inv_sp[(part, prev_d)] + sp1_total + sp2_total + sp3_total - sp_output,
+                        f"InvBal_SP_{part}_D{d_idx}"
+                    )
+                    constraints_added += 1
+
+                    # FG: inv_fg[d] = inv_fg[d-1] + sp_output[d] - delivery[d]
+                    self.model += (
+                        self.inv_fg[(part, d)] == self.inv_fg[(part, prev_d)] + sp_output - delivery_total,
+                        f"InvBal_FG_{part}_D{d_idx}"
+                    )
+                    constraints_added += 1
+
+        print(f"  ✓ Added {constraints_added} inventory balance constraints")
+        print(f"  → Enables speculative WIP processing to utilize idle capacity!")
 
     def _add_flow_constraints(self):
         """Add CUMULATIVE material flow constraints (like weekly optimizer)."""
