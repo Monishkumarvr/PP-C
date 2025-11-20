@@ -150,6 +150,8 @@ class DailyExecutiveReportGenerator:
         # Daily capacity limits (will be updated from data)
         self.capacity_limits_daily = {
             'Casting_Tons': 140,  # ~800/6 working days
+            'Big_Line_Tons': 70,  # Half of total casting capacity
+            'Small_Line_Tons': 70,  # Half of total casting capacity
             'Grinding_Units': 85,  # ~500/6
             'MC1_Units': 70,
             'MC2_Units': 70,
@@ -483,6 +485,8 @@ class DailyExecutiveReportGenerator:
         stage_info = []
         for stage_name, cap_key in [
             ('Casting', 'Casting_Tons'),
+            ('Big Line', 'Big_Line_Tons'),
+            ('Small Line', 'Small_Line_Tons'),
             ('Grinding', 'Grinding_Units'),
             ('MC1', 'MC1_Units'),
             ('MC2', 'MC2_Units'),
