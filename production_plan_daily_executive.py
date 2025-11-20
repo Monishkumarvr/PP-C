@@ -463,8 +463,8 @@ class DailyExecutiveReportGenerator:
         return pd.DataFrame(rows)
 
     def create_capacity_overview(self):
-        """Create capacity utilization overview"""
-        print("  📈 Creating Capacity Overview...")
+        """Create detailed daily capacity utilization by stage"""
+        print("  📈 Creating Capacity Overview with Daily Utilization...")
 
         daily_summary = self.data.get('daily_summary', pd.DataFrame())
 
@@ -474,8 +474,13 @@ class DailyExecutiveReportGenerator:
         rows = []
         rows.append(['DAILY CAPACITY UTILIZATION OVERVIEW'])
         rows.append([''])
-        rows.append(['Stage', 'Total Produced', 'Daily Avg', 'Peak Day', 'Daily Capacity', 'Avg Utilization %'])
 
+        # Summary section
+        rows.append(['SUMMARY BY STAGE'])
+        rows.append([''])
+        rows.append(['Stage', 'Total Produced', 'Daily Avg', 'Peak Day', 'Daily Capacity', 'Avg Utilization %', 'Peak Utilization %'])
+
+        stage_info = []
         for stage_name, cap_key in [
             ('Casting', 'Casting_Tons'),
             ('Grinding', 'Grinding_Units'),
@@ -492,8 +497,45 @@ class DailyExecutiveReportGenerator:
                 peak = daily_summary[cap_key].max()
                 capacity = self.capacity_limits_daily.get(cap_key, 100)
                 avg_util = (avg / capacity * 100) if capacity > 0 else 0
+                peak_util = (peak / capacity * 100) if capacity > 0 else 0
 
-                rows.append([stage_name, f'{total:.1f}', f'{avg:.1f}', f'{peak:.1f}', f'{capacity:.1f}', f'{avg_util:.1f}%'])
+                rows.append([stage_name, f'{total:.1f}', f'{avg:.1f}', f'{peak:.1f}',
+                           f'{capacity:.1f}', f'{avg_util:.1f}%', f'{peak_util:.1f}%'])
+                stage_info.append((stage_name, cap_key))
+
+        # Daily utilization section
+        rows.append([''])
+        rows.append([''])
+        rows.append(['DAILY UTILIZATION % BY STAGE'])
+        rows.append([''])
+
+        # Header row
+        header = ['Date', 'Day']
+        for stage_name, _ in stage_info:
+            header.append(f'{stage_name} Load')
+            header.append(f'{stage_name} Util %')
+        rows.append(header)
+
+        # Data rows
+        for _, row in daily_summary.iterrows():
+            date = row.get('Date')
+            if pd.isna(date):
+                continue
+
+            date_str = date.strftime('%Y-%m-%d') if isinstance(date, datetime) else str(date)
+            day_name = date.strftime('%A') if isinstance(date, datetime) else 'N/A'
+
+            data_row = [date_str, day_name]
+
+            for stage_name, cap_key in stage_info:
+                load = row.get(cap_key, 0)
+                capacity = self.capacity_limits_daily.get(cap_key, 100)
+                util = (load / capacity * 100) if capacity > 0 else 0
+
+                data_row.append(f'{load:.1f}')
+                data_row.append(f'{util:.1f}%')
+
+            rows.append(data_row)
 
         return pd.DataFrame(rows)
 
