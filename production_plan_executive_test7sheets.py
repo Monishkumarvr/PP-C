@@ -2396,14 +2396,14 @@ class FixedExecutiveReportGenerator:
         
         flow_rows.append([
             'Week', 'Casting', 'Grinding', 'MC1', 'MC2', 'MC3', 'SP1', 'SP2', 'SP3',
-            'Delivery', 'Big Line Util %', 'Small Line Util %', 'Notes'
+            'Delivery', 'Big Line Tons', 'Small Line Tons', 'Notes'
         ])
-        
+
         for _, row in weekly.iterrows():
             week = row.get('Week', None)
             if week is None or week not in self.weeks:
                 continue
-            
+
             mc2_units = row.get('MC2_Units', 0)
             sp2_units = row.get('SP2_Units', 0)
             notes = []
@@ -2411,7 +2411,7 @@ class FixedExecutiveReportGenerator:
                 notes.append('MC3 bottleneck')
             if sp2_units > 0 and row.get('SP3_Units', 0) < sp2_units * 0.5:
                 notes.append('SP3 bottleneck')
-            
+
             flow_rows.append([
                 f'W{int(week)}',
                 f'{row.get("Casting_Tons", 0):.0f}',
@@ -2423,14 +2423,14 @@ class FixedExecutiveReportGenerator:
                 f'{row.get("SP2_Units", 0):.0f}',
                 f'{row.get("SP3_Units", 0):.0f}',
                 f'{row.get("Delivery_Units", 0):.0f}',
-                f'{row.get("Big_Line_Util_%", 0):.1f}%' if 'Big_Line_Util_%' in row.index else '-',
-                f'{row.get("Small_Line_Util_%", 0):.1f}%' if 'Small_Line_Util_%' in row.index else '-',
+                f'{row.get("Big_Line_Tons", 0):.1f}',
+                f'{row.get("Small_Line_Tons", 0):.1f}',
                 ', '.join(notes) if notes else ''
             ])
-        
+
         flow_rows.append(['', '', '', '', '', '', '', '', '', '', '', '', ''])
-        big_util_avg = weekly['Big_Line_Util_%'].mean() if 'Big_Line_Util_%' in weekly.columns and len(weekly) > 0 else None
-        small_util_avg = weekly['Small_Line_Util_%'].mean() if 'Small_Line_Util_%' in weekly.columns and len(weekly) > 0 else None
+        big_tons_total = weekly['Big_Line_Tons'].sum() if 'Big_Line_Tons' in weekly.columns and len(weekly) > 0 else 0
+        small_tons_total = weekly['Small_Line_Tons'].sum() if 'Small_Line_Tons' in weekly.columns and len(weekly) > 0 else 0
         flow_rows.append([
             'TOTAL',
             f'{weekly["Casting_Tons"].sum():.0f}',
@@ -2442,11 +2442,13 @@ class FixedExecutiveReportGenerator:
             f'{weekly.get("SP2_Units", pd.Series([0])).sum():.0f}',
             f'{weekly.get("SP3_Units", pd.Series([0])).sum():.0f}',
             f'{weekly["Delivery_Units"].sum():.0f}',
-            f'{big_util_avg:.1f}%' if big_util_avg is not None else '-',
-            f'{small_util_avg:.1f}%' if small_util_avg is not None else '-',
+            f'{big_tons_total:.1f}',
+            f'{small_tons_total:.1f}',
             ''
         ])
-        
+
+        big_tons_avg = weekly['Big_Line_Tons'].mean() if 'Big_Line_Tons' in weekly.columns and len(weekly) > 0 else 0
+        small_tons_avg = weekly['Small_Line_Tons'].mean() if 'Small_Line_Tons' in weekly.columns and len(weekly) > 0 else 0
         flow_rows.append([
             'AVERAGE',
             f'{weekly["Casting_Tons"].mean():.0f}',
@@ -2458,8 +2460,8 @@ class FixedExecutiveReportGenerator:
             f'{weekly.get("SP2_Units", pd.Series([0])).mean():.0f}',
             f'{weekly.get("SP3_Units", pd.Series([0])).mean():.0f}',
             f'{weekly["Delivery_Units"].mean():.0f}',
-            f'{big_util_avg:.1f}%' if big_util_avg is not None else '-',
-            f'{small_util_avg:.1f}%' if small_util_avg is not None else '-',
+            f'{big_tons_avg:.1f}',
+            f'{small_tons_avg:.1f}',
             ''
         ])
         
