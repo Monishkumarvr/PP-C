@@ -383,12 +383,12 @@ class DailyOptimizationModel:
                         usage_minutes += self.x_sp2[(v, d)] * p.get('sp2_cycle', 0)
                     elif 'SP3' in operation or 'Top' in operation:
                         usage_minutes += self.x_sp3[(v, d)] * p.get('sp3_cycle', 0)
-                
-                if usage_minutes > 0:
-                    self.model += (
-                        usage_minutes <= daily_minutes,
-                        f"{resource_code}_Cap_{d.strftime('%Y%m%d')}"
-                    )
+
+                # Add constraint (usage_minutes is a PuLP expression, always add it)
+                self.model += (
+                    usage_minutes <= daily_minutes,
+                    f"{resource_code}_Cap_{d.strftime('%Y%m%d')}"
+                )
         
         print(f"  ✓ Added {len(self.working_days) * 2} casting line capacity constraints")
         print(f"  ✓ Added {len(self.machine_manager.machines) * len(self.working_days)} machine capacity constraints")
