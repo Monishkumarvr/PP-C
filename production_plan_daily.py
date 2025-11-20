@@ -458,19 +458,25 @@ class DailyOptimizationModel:
                     
                     # Determine which stage uses this resource
                     if 'Grinding' in operation or 'GR' in resource_code:
-                        usage_minutes += self.x_grinding[(v, d)] * p.get('grinding_cycle', 0)
+                        usage_minutes += self.x_grinding[(v, d)] * p.get('grind_cycle', 0)
                     elif 'MC1' in operation or 'MC1' in resource_code:
-                        usage_minutes += self.x_mc1[(v, d)] * p.get('mc1_cycle', 0)
+                        mach_cycles = p.get('mach_cycles', [0, 0, 0])
+                        usage_minutes += self.x_mc1[(v, d)] * mach_cycles[0]
                     elif 'MC2' in operation or 'MC2' in resource_code:
-                        usage_minutes += self.x_mc2[(v, d)] * p.get('mc2_cycle', 0)
+                        mach_cycles = p.get('mach_cycles', [0, 0, 0])
+                        usage_minutes += self.x_mc2[(v, d)] * mach_cycles[1]
                     elif 'MC3' in operation or 'MC3' in resource_code:
-                        usage_minutes += self.x_mc3[(v, d)] * p.get('mc3_cycle', 0)
+                        mach_cycles = p.get('mach_cycles', [0, 0, 0])
+                        usage_minutes += self.x_mc3[(v, d)] * mach_cycles[2]
                     elif 'SP1' in operation or 'Primer' in operation:
-                        usage_minutes += self.x_sp1[(v, d)] * p.get('sp1_cycle', 0)
+                        paint_cycles = p.get('paint_cycles', [0, 0, 0])
+                        usage_minutes += self.x_sp1[(v, d)] * paint_cycles[0]
                     elif 'SP2' in operation or 'Intermediate' in operation:
-                        usage_minutes += self.x_sp2[(v, d)] * p.get('sp2_cycle', 0)
+                        paint_cycles = p.get('paint_cycles', [0, 0, 0])
+                        usage_minutes += self.x_sp2[(v, d)] * paint_cycles[1]
                     elif 'SP3' in operation or 'Top' in operation:
-                        usage_minutes += self.x_sp3[(v, d)] * p.get('sp3_cycle', 0)
+                        paint_cycles = p.get('paint_cycles', [0, 0, 0])
+                        usage_minutes += self.x_sp3[(v, d)] * paint_cycles[2]
 
                 # Add constraint (usage_minutes is a PuLP expression, always add it)
                 self.model += (
@@ -1005,7 +1011,7 @@ class DailyResultsAnalyzer:
                 small_line_tons = dc[dc['Moulding_Line'].str.contains('Small Line', case=False, na=False)]['Total_Weight_ton'].sum()
 
             # Calculate hours for each stage using cycle times
-            def calc_hours(stage_df, cycle_key):
+            def calc_hours_simple(stage_df, cycle_key):
                 """Calculate total hours for a stage using cycle times from params."""
                 hours = 0.0
                 if len(stage_df) > 0 and 'Part' in stage_df.columns and 'Units' in stage_df.columns:
@@ -1016,14 +1022,26 @@ class DailyResultsAnalyzer:
                         hours += units * cycle_min / 60.0
                 return hours
 
-            casting_hours = calc_hours(dc, 'casting_cycle')
-            grinding_hours = calc_hours(dg, 'grinding_cycle')
-            mc1_hours = calc_hours(dm1, 'mc1_cycle')
-            mc2_hours = calc_hours(dm2, 'mc2_cycle')
-            mc3_hours = calc_hours(dm3, 'mc3_cycle')
-            sp1_hours = calc_hours(ds1, 'sp1_cycle')
-            sp2_hours = calc_hours(ds2, 'sp2_cycle')
-            sp3_hours = calc_hours(ds3, 'sp3_cycle')
+            def calc_hours_array(stage_df, array_key, index):
+                """Calculate hours for stages with array cycle times (machining, painting)."""
+                hours = 0.0
+                if len(stage_df) > 0 and 'Part' in stage_df.columns and 'Units' in stage_df.columns:
+                    for _, row in stage_df.iterrows():
+                        part = row['Part']
+                        units = row['Units']
+                        cycles = self.params.get(part, {}).get(array_key, [0, 0, 0])
+                        cycle_min = cycles[index] if index < len(cycles) else 0
+                        hours += units * cycle_min / 60.0
+                return hours
+
+            casting_hours = calc_hours_simple(dc, 'casting_cycle')
+            grinding_hours = calc_hours_simple(dg, 'grind_cycle')
+            mc1_hours = calc_hours_array(dm1, 'mach_cycles', 0)
+            mc2_hours = calc_hours_array(dm2, 'mach_cycles', 1)
+            mc3_hours = calc_hours_array(dm3, 'mach_cycles', 2)
+            sp1_hours = calc_hours_array(ds1, 'paint_cycles', 0)
+            sp2_hours = calc_hours_array(ds2, 'paint_cycles', 1)
+            sp3_hours = calc_hours_array(ds3, 'paint_cycles', 2)
 
             # Calculate Big Line and Small Line hours separately
             big_line_hours = 0.0
