@@ -262,44 +262,64 @@ class DailyOptimizationModel:
             part_params = self.params.get(part, {})
 
             for d in days:
-                # Casting and Grinding - all parts have these
-                self.x_casting[(v, d)] = pulp.LpVariable(f"cast_{v}_{d.strftime('%Y%m%d')}", 0, None)
-                self.x_grinding[(v, d)] = pulp.LpVariable(f"grind_{v}_{d.strftime('%Y%m%d')}", 0, None)
+                # Casting - Integer (whole units)
+                self.x_casting[(v, d)] = pulp.LpVariable(
+                    f"cast_{v}_{d.strftime('%Y%m%d')}", 0, None, cat='Integer'
+                )
 
-                # Machining stages - only create if part routing requires them
+                # Grinding - Integer (whole units for daily granularity)
+                self.x_grinding[(v, d)] = pulp.LpVariable(
+                    f"grind_{v}_{d.strftime('%Y%m%d')}", 0, None, cat='Integer'
+                )
+
+                # Machining stages - Integer, only create if part routing requires them
                 if part_params.get('has_mc1', True):
-                    self.x_mc1[(v, d)] = pulp.LpVariable(f"mc1_{v}_{d.strftime('%Y%m%d')}", 0, None)
+                    self.x_mc1[(v, d)] = pulp.LpVariable(
+                        f"mc1_{v}_{d.strftime('%Y%m%d')}", 0, None, cat='Integer'
+                    )
                 else:
                     self.x_mc1[(v, d)] = 0  # Part skips MC1
 
                 if part_params.get('has_mc2', True):
-                    self.x_mc2[(v, d)] = pulp.LpVariable(f"mc2_{v}_{d.strftime('%Y%m%d')}", 0, None)
+                    self.x_mc2[(v, d)] = pulp.LpVariable(
+                        f"mc2_{v}_{d.strftime('%Y%m%d')}", 0, None, cat='Integer'
+                    )
                 else:
                     self.x_mc2[(v, d)] = 0  # Part skips MC2
 
                 if part_params.get('has_mc3', True):
-                    self.x_mc3[(v, d)] = pulp.LpVariable(f"mc3_{v}_{d.strftime('%Y%m%d')}", 0, None)
+                    self.x_mc3[(v, d)] = pulp.LpVariable(
+                        f"mc3_{v}_{d.strftime('%Y%m%d')}", 0, None, cat='Integer'
+                    )
                 else:
                     self.x_mc3[(v, d)] = 0  # Part skips MC3
 
-                # Painting stages - only create if part routing requires them
+                # Painting stages - Integer, only create if part routing requires them
                 if part_params.get('has_sp1', True):
-                    self.x_sp1[(v, d)] = pulp.LpVariable(f"sp1_{v}_{d.strftime('%Y%m%d')}", 0, None)
+                    self.x_sp1[(v, d)] = pulp.LpVariable(
+                        f"sp1_{v}_{d.strftime('%Y%m%d')}", 0, None, cat='Integer'
+                    )
                 else:
                     self.x_sp1[(v, d)] = 0  # Part skips SP1
 
                 if part_params.get('has_sp2', True):
-                    self.x_sp2[(v, d)] = pulp.LpVariable(f"sp2_{v}_{d.strftime('%Y%m%d')}", 0, None)
+                    self.x_sp2[(v, d)] = pulp.LpVariable(
+                        f"sp2_{v}_{d.strftime('%Y%m%d')}", 0, None, cat='Integer'
+                    )
                 else:
                     self.x_sp2[(v, d)] = 0  # Part skips SP2
 
                 if part_params.get('has_sp3', True):
-                    self.x_sp3[(v, d)] = pulp.LpVariable(f"sp3_{v}_{d.strftime('%Y%m%d')}", 0, None)
+                    self.x_sp3[(v, d)] = pulp.LpVariable(
+                        f"sp3_{v}_{d.strftime('%Y%m%d')}", 0, None, cat='Integer'
+                    )
                 else:
                     self.x_sp3[(v, d)] = 0  # Part skips SP3
 
-                # Delivery - all parts have this
-                self.x_delivery[(v, d)] = pulp.LpVariable(f"deliv_{v}_{d.strftime('%Y%m%d')}", 0, None)
+                # Delivery - Integer (whole units)
+                self.x_delivery[(v, d)] = pulp.LpVariable(
+                    f"deliv_{v}_{d.strftime('%Y%m%d')}", 0, None, cat='Integer'
+                )
         
         # Unmet demand and lateness
         for v in variants:
