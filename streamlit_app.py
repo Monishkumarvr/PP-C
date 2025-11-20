@@ -191,7 +191,8 @@ def validate_uploaded_file(uploaded_file):
                     date_col = col
                     break
             if date_col:
-                dates = pd.to_datetime(sales_df[date_col], errors='coerce')
+                # Use dayfirst=True for Indian date format (dd/mm/yyyy)
+                dates = pd.to_datetime(sales_df[date_col], errors='coerce', dayfirst=True)
                 validation_results['summary']['earliest_date'] = dates.min()
                 validation_results['summary']['latest_date'] = dates.max()
 
@@ -953,7 +954,8 @@ def main():
                 earliest = summary['earliest_date']
                 latest = summary['latest_date']
                 if pd.notna(earliest) and pd.notna(latest):
-                    date_range = f"{earliest.strftime('%m/%d')} - {latest.strftime('%m/%d')}"
+                    # Show full date format with year for clarity
+                    date_range = f"{earliest.strftime('%d %b %Y')} - {latest.strftime('%d %b %Y')}"
                 else:
                     date_range = "N/A"
             else:
