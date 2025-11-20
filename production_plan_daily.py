@@ -46,12 +46,26 @@ class DailyProductionConfig:
         # Compatibility attributes for weekly data loader and parameter builder
         self.PLANNING_BUFFER_WEEKS = int(self.PLANNING_BUFFER_DAYS / 7)  # ~2 weeks
         self.MAX_PLANNING_WEEKS = int(self.MAX_PLANNING_DAYS / 7)  # ~30 weeks
+        self.PLANNING_WEEKS = None  # Will be calculated dynamically
+        self.TRACKING_WEEKS = None  # Will be calculated dynamically
 
         # Lag attributes (set to 0 as we handle lead times in days directly)
         self.COOLING_SHAKEOUT_LAG_WEEKS = 0
         self.GRINDING_LAG_WEEKS = 0
         self.MACHINING_LAG_WEEKS = 0
         self.PAINTING_LAG_WEEKS = 0
+
+        # Lead time parameters (for parameter builder compatibility)
+        self.MIN_LEAD_TIME_WEEKS = 2  # Minimum lead time
+        self.AVG_LEAD_TIME_WEEKS = 4  # Average lead time for forecasting
+        self.DELIVERY_BUFFER_WEEKS = 1  # Delivery flexibility
+        self.MAX_EARLY_WEEKS = 8  # Maximum weeks to produce early
+
+        # Additional compatibility attributes
+        self.WORKING_HOURS_PER_DAY = 24  # Hours available for cooling/shakeout
+        self.OVERTIME_ALLOWANCE = 0.0
+        self.STARTUP_BONUS = -50
+        self.COUNTRY_CODE = 'IN'
 
         # Working schedule
         self.WORKING_DAYS_PER_WEEK = 6
@@ -62,9 +76,15 @@ class DailyProductionConfig:
         self.HOURS_PER_SHIFT = 12
         self.SHIFTS_PER_DAY = 2
         
-        # Daily capacities (derived from weekly / 6)
+        # Daily capacities
+        self.BIG_LINE_HOURS_PER_SHIFT = self.HOURS_PER_SHIFT
+        self.SMALL_LINE_HOURS_PER_SHIFT = self.HOURS_PER_SHIFT
         self.BIG_LINE_HOURS_PER_DAY = self.HOURS_PER_SHIFT * self.SHIFTS_PER_DAY * self.OEE
         self.SMALL_LINE_HOURS_PER_DAY = self.HOURS_PER_SHIFT * self.SHIFTS_PER_DAY * self.OEE
+
+        # Weekly capacities (for compatibility with existing code)
+        self.BIG_LINE_HOURS_PER_WEEK = self.BIG_LINE_HOURS_PER_DAY * self.WORKING_DAYS_PER_WEEK
+        self.SMALL_LINE_HOURS_PER_WEEK = self.SMALL_LINE_HOURS_PER_DAY * self.WORKING_DAYS_PER_WEEK
         
         # Lead times (in days)
         self.DEFAULT_COOLING_DAYS = 1  # Casting -> Grinding
@@ -72,11 +92,15 @@ class DailyProductionConfig:
         self.DEFAULT_MC_STAGE_DAYS = 1  # Between MC stages
         self.DEFAULT_PAINT_DRYING_DAYS = 1  # Between paint stages
         
-        # Penalties
+        # Penalties (daily-based)
         self.UNMET_DEMAND_PENALTY = 200000
-        self.LATENESS_PENALTY_PER_DAY = 5000  # Per day late (was 150k/week)
-        self.INVENTORY_HOLDING_COST_PER_DAY = 0.15  # Per unit per day (was 1/week)
+        self.LATENESS_PENALTY_PER_DAY = 5000  # Per day late
+        self.INVENTORY_HOLDING_COST_PER_DAY = 0.15  # Per unit per day
         self.SETUP_PENALTY = 5
+
+        # Penalty compatibility (weekly equivalents for existing code)
+        self.LATENESS_PENALTY = 150000  # Per week late (for compatibility)
+        self.INVENTORY_HOLDING_COST = 1  # Per unit per week (for compatibility)
         
         # Delivery flexibility
         self.DELIVERY_WINDOW_DAYS = 3  # Allow ±3 days from due date
