@@ -745,11 +745,20 @@ class DailyResultsAnalyzer:
             dd = stage_plans['delivery'][stage_plans['delivery']['Date'] == d] if len(stage_plans['delivery']) > 0 else stage_plans['delivery']
 
             # Sum units and weights (empty DataFrames return 0 for sum)
+            # Calculate Big Line and Small Line tonnage separately
+            big_line_tons = 0
+            small_line_tons = 0
+            if 'Total_Weight_ton' in dc.columns and 'Moulding_Line' in dc.columns:
+                big_line_tons = dc[dc['Moulding_Line'].str.contains('Big Line', case=False, na=False)]['Total_Weight_ton'].sum()
+                small_line_tons = dc[dc['Moulding_Line'].str.contains('Small Line', case=False, na=False)]['Total_Weight_ton'].sum()
+
             daily_data.append({
                 'Date': d,
                 'Day': d.strftime('%A'),
                 'Is_Holiday': 'No',
                 'Casting_Tons': dc['Total_Weight_ton'].sum() if 'Total_Weight_ton' in dc.columns else 0,
+                'Big_Line_Tons': big_line_tons,
+                'Small_Line_Tons': small_line_tons,
                 'Casting_Units': dc['Units'].sum() if 'Units' in dc.columns else 0,
                 'Grinding_Units': dg['Units'].sum() if 'Units' in dg.columns else 0,
                 'MC1_Units': dm1['Units'].sum() if 'Units' in dm1.columns else 0,
@@ -785,6 +794,8 @@ class DailyResultsAnalyzer:
             weekly_data.append({
                 'Week': week_num,
                 'Casting_Tons': week_days['Casting_Tons'].sum(),
+                'Big_Line_Tons': week_days['Big_Line_Tons'].sum(),
+                'Small_Line_Tons': week_days['Small_Line_Tons'].sum(),
                 'Casting_Units': week_days['Casting_Units'].sum(),
                 'Grinding_Units': week_days['Grinding_Units'].sum(),
                 'MC1_Units': week_days['MC1_Units'].sum(),
