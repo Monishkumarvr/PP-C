@@ -168,10 +168,35 @@ class DailyExecutiveReportGenerator:
             excel_file = pd.ExcelFile(self.detailed_path)
             print(f"  ✓ Found {len(excel_file.sheet_names)} sheets")
 
-            # Load key sheets
+            # Load all sheets with their original names
             for sheet_name in excel_file.sheet_names:
                 self.data[sheet_name] = pd.read_excel(self.detailed_path, sheet_name=sheet_name)
                 print(f"    - {sheet_name}: {len(self.data[sheet_name])} rows")
+
+            # Create aliases for easier access (map to expected names)
+            if 'Daily_Summary' in self.data:
+                self.data['daily_summary'] = self.data['Daily_Summary']
+            if 'Weekly_Summary' in self.data:
+                self.data['weekly_summary'] = self.data['Weekly_Summary']
+            if 'Order_Fulfillment' in self.data:
+                self.data['fulfillment'] = self.data['Order_Fulfillment']
+
+            # Map stage plans
+            stage_mapping = {
+                'Casting': 'casting_plan',
+                'Grinding': 'grinding_plan',
+                'Mc1': 'mc1_plan',
+                'Mc2': 'mc2_plan',
+                'Mc3': 'mc3_plan',
+                'Sp1': 'sp1_plan',
+                'Sp2': 'sp2_plan',
+                'Sp3': 'sp3_plan',
+                'Delivery': 'delivery_plan'
+            }
+
+            for original_name, alias in stage_mapping.items():
+                if original_name in self.data:
+                    self.data[alias] = self.data[original_name]
 
             # Update capacity limits from actual data
             self._update_capacity_limits_from_data()
@@ -208,16 +233,22 @@ class DailyExecutiveReportGenerator:
         daily_summary = self.data.get('daily_summary', pd.DataFrame())
         fulfillment = self.data.get('fulfillment', pd.DataFrame())
 
-        # Calculate KPIs
+        # Calculate KPIs (handle different column names)
         if not fulfillment.empty:
             total_orders = len(fulfillment)
-            fulfilled = len(fulfillment[fulfillment['Fulfilled'] >= fulfillment['Ordered']])
+
+            # Handle column name variations
+            ordered_col = 'Ordered_Qty' if 'Ordered_Qty' in fulfillment.columns else 'Ordered'
+            delivered_col = 'Delivered_Qty' if 'Delivered_Qty' in fulfillment.columns else 'Fulfilled'
+            late_col = 'Late_Days' if 'Late_Days' in fulfillment.columns else 'Days_Late'
+
+            fulfilled = len(fulfillment[fulfillment[delivered_col] >= fulfillment[ordered_col]])
             fulfillment_pct = (fulfilled / total_orders * 100) if total_orders > 0 else 0
 
-            on_time = len(fulfillment[fulfillment['Days_Late'] <= 0])
+            on_time = len(fulfillment[fulfillment[late_col] <= 0])
             on_time_pct = (on_time / total_orders * 100) if total_orders > 0 else 0
 
-            avg_late_days = fulfillment[fulfillment['Days_Late'] > 0]['Days_Late'].mean()
+            avg_late_days = fulfillment[fulfillment[late_col] > 0][late_col].mean()
             avg_late_days = avg_late_days if pd.notna(avg_late_days) else 0
         else:
             total_orders = 0
@@ -346,31 +377,38 @@ class DailyExecutiveReportGenerator:
         if fulfillment.empty:
             return pd.DataFrame([['No fulfillment data available']])
 
+        # Handle column name variations
+        ordered_col = 'Ordered_Qty' if 'Ordered_Qty' in fulfillment.columns else 'Ordered'
+        delivered_col = 'Delivered_Qty' if 'Delivered_Qty' in fulfillment.columns else 'Fulfilled'
+        late_col = 'Late_Days' if 'Late_Days' in fulfillment.columns else 'Days_Late'
+
         rows = []
         rows.append(['DELIVERY FULFILLMENT TRACKER'])
         rows.append([''])
-        rows.append(['Part', 'Ordered Qty', 'Delivered Qty', 'Shortfall', 'Due Date', 'Delivery Date', 'Days Late', 'Status'])
+        rows.append(['Part', 'Variant', 'Ordered Qty', 'Delivered Qty', 'Unmet Qty', 'Due Date', 'Days Late', 'Status'])
 
         for _, row in fulfillment.iterrows():
-            ordered = row.get('Ordered', 0)
-            delivered = row.get('Fulfilled', 0)
-            shortfall = ordered - delivered
-            days_late = row.get('Days_Late', 0)
+            ordered = row.get(ordered_col, 0)
+            delivered = row.get(delivered_col, 0)
+            unmet = row.get('Unmet_Qty', 0)
+            days_late = row.get(late_col, 0)
 
-            if days_late <= 0:
+            if days_late <= 0 and unmet < 0.5:
                 status = 'On Time'
-            elif days_late <= 2:
+            elif days_late <= 2 and unmet < 0.5:
                 status = 'Minor Delay'
+            elif unmet >= 0.5:
+                status = 'Partial Fulfillment'
             else:
                 status = 'Critical'
 
             rows.append([
                 row.get('Part', 'Unknown'),
+                row.get('Variant', ''),
                 ordered,
                 delivered,
-                shortfall,
+                unmet,
                 row.get('Due_Date', ''),
-                row.get('Delivery_Date', ''),
                 days_late,
                 status
             ])
