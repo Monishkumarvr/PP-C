@@ -104,6 +104,112 @@ def create_config_from_inputs(config_inputs):
     return config
 
 
+def validate_uploaded_file(uploaded_file):
+    """Validate the uploaded Excel file has required sheets and columns."""
+    validation_results = {
+        'valid': True,
+        'errors': [],
+        'warnings': [],
+        'summary': {}
+    }
+
+    try:
+        # Read Excel file
+        excel_file = pd.ExcelFile(uploaded_file)
+        available_sheets = excel_file.sheet_names
+
+        # Required sheets
+        required_sheets = {
+            'Part Master': ['FG Code', 'Standard unit wt.'],
+            'Sales Order': ['Material Code', 'Balance Qty'],
+            'Machine Constraints': ['Resource Code'],
+            'Stage WIP': [],
+            'Mould Box Capacity': ['Box_Size']
+        }
+
+        # Check for required sheets
+        for sheet_name, required_cols in required_sheets.items():
+            # Try different naming conventions
+            found_sheet = None
+            for available in available_sheets:
+                if sheet_name.lower().replace(' ', '') in available.lower().replace(' ', ''):
+                    found_sheet = available
+                    break
+
+            if found_sheet:
+                df = pd.read_excel(uploaded_file, sheet_name=found_sheet)
+                validation_results['summary'][sheet_name] = {
+                    'rows': len(df),
+                    'columns': len(df.columns)
+                }
+
+                # Check required columns
+                for col in required_cols:
+                    col_found = False
+                    for df_col in df.columns:
+                        if col.lower() in str(df_col).lower():
+                            col_found = True
+                            break
+                    if not col_found:
+                        validation_results['warnings'].append(
+                            f"Column '{col}' not found in {sheet_name}"
+                        )
+            else:
+                if sheet_name in ['Part Master', 'Sales Order']:
+                    validation_results['errors'].append(f"Required sheet '{sheet_name}' not found")
+                    validation_results['valid'] = False
+                else:
+                    validation_results['warnings'].append(f"Sheet '{sheet_name}' not found")
+
+        # Load Sales Order for summary
+        sales_sheet = None
+        for sheet in available_sheets:
+            if 'sales' in sheet.lower() or 'order' in sheet.lower():
+                sales_sheet = sheet
+                break
+
+        if sales_sheet:
+            sales_df = pd.read_excel(uploaded_file, sheet_name=sales_sheet)
+            validation_results['summary']['total_orders'] = len(sales_df)
+
+            # Find quantity column
+            qty_col = None
+            for col in sales_df.columns:
+                if 'qty' in str(col).lower() or 'quantity' in str(col).lower():
+                    qty_col = col
+                    break
+            if qty_col:
+                validation_results['summary']['total_quantity'] = int(sales_df[qty_col].sum())
+
+            # Find date column
+            date_col = None
+            for col in sales_df.columns:
+                if 'date' in str(col).lower() or 'delivery' in str(col).lower():
+                    date_col = col
+                    break
+            if date_col:
+                dates = pd.to_datetime(sales_df[date_col], errors='coerce')
+                validation_results['summary']['earliest_date'] = dates.min()
+                validation_results['summary']['latest_date'] = dates.max()
+
+        # Load Part Master for summary
+        part_sheet = None
+        for sheet in available_sheets:
+            if 'part' in sheet.lower() and 'master' in sheet.lower():
+                part_sheet = sheet
+                break
+
+        if part_sheet:
+            part_df = pd.read_excel(uploaded_file, sheet_name=part_sheet)
+            validation_results['summary']['total_parts'] = len(part_df)
+
+    except Exception as e:
+        validation_results['valid'] = False
+        validation_results['errors'].append(f"Error reading file: {str(e)}")
+
+    return validation_results
+
+
 def run_optimization(uploaded_file, config):
     """Run the optimization and return results."""
     # Save uploaded file to temp location
@@ -664,7 +770,68 @@ def main():
             - Cycle times for each operation
             """)
 
-    elif run_button:
+    else:
+        # File uploaded but not run yet - show validation and preview
+        st.subheader("📋 Data Validation & Preview")
+
+        # Validate file
+        validation = validate_uploaded_file(uploaded_file)
+
+        # Show validation status
+        if validation['valid']:
+            st.success("✅ File validation passed!")
+        else:
+            st.error("❌ File validation failed!")
+            for error in validation['errors']:
+                st.error(f"• {error}")
+
+        # Show warnings
+        if validation['warnings']:
+            with st.expander(f"⚠️ Warnings ({len(validation['warnings'])})"):
+                for warning in validation['warnings']:
+                    st.warning(f"• {warning}")
+
+        # Show data summary
+        st.subheader("📊 Data Summary")
+
+        summary = validation['summary']
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.metric("Total Orders", summary.get('total_orders', 'N/A'))
+        with col2:
+            st.metric("Total Parts", summary.get('total_parts', 'N/A'))
+        with col3:
+            st.metric("Total Quantity", f"{summary.get('total_quantity', 0):,}")
+        with col4:
+            if 'earliest_date' in summary and 'latest_date' in summary:
+                earliest = summary['earliest_date']
+                latest = summary['latest_date']
+                if pd.notna(earliest) and pd.notna(latest):
+                    date_range = f"{earliest.strftime('%m/%d')} - {latest.strftime('%m/%d')}"
+                else:
+                    date_range = "N/A"
+            else:
+                date_range = "N/A"
+            st.metric("Delivery Range", date_range)
+
+        # Show sheet details
+        with st.expander("📁 Sheet Details"):
+            sheet_data = []
+            for sheet_name, details in summary.items():
+                if isinstance(details, dict) and 'rows' in details:
+                    sheet_data.append({
+                        'Sheet': sheet_name,
+                        'Rows': details['rows'],
+                        'Columns': details['columns']
+                    })
+            if sheet_data:
+                st.dataframe(pd.DataFrame(sheet_data), use_container_width=True)
+
+        st.info("👈 Click 'Run Optimization' in the sidebar to start planning.")
+
+    if run_button and uploaded_file is not None:
         # Run optimization
         config_inputs = {
             'current_date': datetime.combine(current_date, datetime.min.time()),
@@ -711,13 +878,14 @@ def main():
         fulfillment_reports = all_results['fulfillment_reports']
 
         # Results tabs
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
             "📊 Dashboard",
             "📈 Capacity Analysis",
             "📦 Production Schedule",
             "🚚 Delivery Tracking",
             "🔮 What-If Analysis",
-            "📥 Download"
+            "📥 Download",
+            "✏️ Data Editor"
         ])
 
         with tab1:
@@ -1442,6 +1610,229 @@ def main():
                     file_name="customer_fulfillment.csv",
                     mime="text/csv"
                 )
+
+        with tab7:
+            st.header("Data Editor")
+            st.markdown("Modify data and re-run optimization to see impact of changes.")
+
+            # Initialize edited data in session state if not present
+            if 'edited_orders' not in st.session_state:
+                st.session_state['edited_orders'] = None
+            if 'edited_wip' not in st.session_state:
+                st.session_state['edited_wip'] = None
+
+            # Create sub-tabs for different editors
+            editor_tab1, editor_tab2, editor_tab3 = st.tabs([
+                "📋 Sales Orders",
+                "📦 WIP Inventory",
+                "➕ Add New Order"
+            ])
+
+            with editor_tab1:
+                st.subheader("Edit Sales Orders")
+                st.markdown("Modify order quantities or delivery dates.")
+
+                # Get current orders from results
+                order_fulfillment = fulfillment_reports['order_fulfillment']
+
+                # Create editable dataframe
+                edit_cols = ['Sales_Order_No', 'Part_Code', 'Customer', 'Ordered_Qty',
+                            'Delivery_Status', 'Committed_Week']
+
+                # Filter to available columns
+                available_cols = [col for col in edit_cols if col in order_fulfillment.columns]
+
+                if available_cols:
+                    orders_to_edit = order_fulfillment[available_cols].copy()
+
+                    # Use data editor
+                    edited_orders = st.data_editor(
+                        orders_to_edit,
+                        num_rows="dynamic",
+                        use_container_width=True,
+                        height=400,
+                        column_config={
+                            "Ordered_Qty": st.column_config.NumberColumn(
+                                "Quantity",
+                                min_value=0,
+                                step=1
+                            ),
+                            "Committed_Week": st.column_config.NumberColumn(
+                                "Delivery Week",
+                                min_value=1,
+                                max_value=52
+                            )
+                        }
+                    )
+
+                    # Check for changes
+                    if not orders_to_edit.equals(edited_orders):
+                        st.session_state['edited_orders'] = edited_orders
+                        st.warning("⚠️ You have unsaved changes. Click 'Apply Changes' to update.")
+
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("Apply Changes", type="primary", key="apply_orders"):
+                            st.session_state['edited_orders'] = edited_orders
+                            st.success("✅ Order changes saved! Re-run optimization to see impact.")
+
+                    with col2:
+                        if st.button("Reset to Original", key="reset_orders"):
+                            st.session_state['edited_orders'] = None
+                            st.rerun()
+
+                else:
+                    st.warning("Order data not available for editing.")
+
+            with editor_tab2:
+                st.subheader("Edit WIP Inventory")
+                st.markdown("Update current work-in-progress quantities at each stage.")
+
+                # Get WIP data
+                if 'data' in all_results and 'stage_wip' in all_results['data']:
+                    wip_data = all_results['data']['stage_wip'].copy()
+
+                    # Create editable version
+                    wip_cols = ['CastingItem', 'FG', 'SP', 'MC', 'GR', 'CS']
+                    available_wip_cols = [col for col in wip_cols if col in wip_data.columns]
+
+                    if available_wip_cols:
+                        wip_to_edit = wip_data[available_wip_cols].head(50)  # Limit rows for performance
+
+                        edited_wip = st.data_editor(
+                            wip_to_edit,
+                            use_container_width=True,
+                            height=400,
+                            column_config={
+                                "FG": st.column_config.NumberColumn("Finished Goods", min_value=0),
+                                "SP": st.column_config.NumberColumn("Painting WIP", min_value=0),
+                                "MC": st.column_config.NumberColumn("Machining WIP", min_value=0),
+                                "GR": st.column_config.NumberColumn("Grinding WIP", min_value=0),
+                                "CS": st.column_config.NumberColumn("Casting WIP", min_value=0)
+                            }
+                        )
+
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            if st.button("Apply WIP Changes", type="primary", key="apply_wip"):
+                                st.session_state['edited_wip'] = edited_wip
+                                st.success("✅ WIP changes saved! Re-run optimization to see impact.")
+
+                        with col2:
+                            if st.button("Reset WIP to Original", key="reset_wip"):
+                                st.session_state['edited_wip'] = None
+                                st.rerun()
+
+                        # Show WIP summary
+                        st.subheader("WIP Summary")
+                        col1, col2, col3, col4, col5 = st.columns(5)
+                        with col1:
+                            st.metric("FG", int(wip_to_edit['FG'].sum()) if 'FG' in wip_to_edit.columns else 0)
+                        with col2:
+                            st.metric("SP", int(wip_to_edit['SP'].sum()) if 'SP' in wip_to_edit.columns else 0)
+                        with col3:
+                            st.metric("MC", int(wip_to_edit['MC'].sum()) if 'MC' in wip_to_edit.columns else 0)
+                        with col4:
+                            st.metric("GR", int(wip_to_edit['GR'].sum()) if 'GR' in wip_to_edit.columns else 0)
+                        with col5:
+                            st.metric("CS", int(wip_to_edit['CS'].sum()) if 'CS' in wip_to_edit.columns else 0)
+                    else:
+                        st.warning("WIP columns not found in data.")
+                else:
+                    st.warning("WIP data not available.")
+
+            with editor_tab3:
+                st.subheader("Add New Order")
+                st.markdown("Create a new sales order to include in optimization.")
+
+                # Get available parts
+                part_master = all_results['data']['part_master']
+                available_parts = sorted(part_master['FG Code'].dropna().unique().tolist())
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    new_part = st.selectbox(
+                        "Part Code",
+                        options=available_parts,
+                        key="new_order_part"
+                    )
+
+                    new_qty = st.number_input(
+                        "Quantity",
+                        min_value=1,
+                        max_value=10000,
+                        value=100,
+                        step=10,
+                        key="new_order_qty"
+                    )
+
+                with col2:
+                    new_customer = st.text_input(
+                        "Customer ID",
+                        value="NEW_CUSTOMER",
+                        key="new_order_customer"
+                    )
+
+                    new_week = st.number_input(
+                        "Delivery Week",
+                        min_value=1,
+                        max_value=30,
+                        value=10,
+                        key="new_order_week"
+                    )
+
+                if st.button("Add Order", type="primary", key="add_new_order"):
+                    # Store new order
+                    if 'new_orders' not in st.session_state:
+                        st.session_state['new_orders'] = []
+
+                    new_order = {
+                        'Part_Code': new_part,
+                        'Quantity': new_qty,
+                        'Customer': new_customer,
+                        'Delivery_Week': new_week
+                    }
+                    st.session_state['new_orders'].append(new_order)
+                    st.success(f"✅ Added order: {new_qty} units of {new_part} for Week {new_week}")
+
+                # Show pending new orders
+                if 'new_orders' in st.session_state and st.session_state['new_orders']:
+                    st.subheader("Pending New Orders")
+                    new_orders_df = pd.DataFrame(st.session_state['new_orders'])
+                    st.dataframe(new_orders_df, use_container_width=True)
+
+                    if st.button("Clear All New Orders", key="clear_new_orders"):
+                        st.session_state['new_orders'] = []
+                        st.rerun()
+
+            # Re-run optimization section
+            st.markdown("---")
+            st.subheader("🔄 Re-run Optimization")
+
+            has_changes = (
+                st.session_state.get('edited_orders') is not None or
+                st.session_state.get('edited_wip') is not None or
+                (st.session_state.get('new_orders') and len(st.session_state['new_orders']) > 0)
+            )
+
+            if has_changes:
+                st.info("You have pending changes. Re-run optimization to apply them.")
+
+                if st.button("🚀 Re-run with Changes", type="primary", use_container_width=True):
+                    st.warning("⚠️ Re-running optimization with edited data is not yet implemented. "
+                              "Please download the modified data and upload it as a new file.")
+
+                    # Show what would change
+                    st.markdown("### Pending Changes Summary")
+                    if st.session_state.get('edited_orders') is not None:
+                        st.write("• Sales orders modified")
+                    if st.session_state.get('edited_wip') is not None:
+                        st.write("• WIP inventory modified")
+                    if st.session_state.get('new_orders'):
+                        st.write(f"• {len(st.session_state['new_orders'])} new orders added")
+            else:
+                st.info("No changes to apply. Edit data above to make changes.")
 
     # Footer
     st.markdown("---")
