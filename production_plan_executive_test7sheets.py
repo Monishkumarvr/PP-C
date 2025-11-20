@@ -613,8 +613,9 @@ class FixedExecutiveReportGenerator:
         
         self._determine_weeks()
 
-        # Update capacity limits based on actual optimizer output
-        self._update_capacity_limits_from_actual_data()
+        # NOTE: Capacity limits and utilization percentages are now calculated correctly
+        # in production_plan_test.py based on actual machine capacity, not max output
+        # No need to recalculate here - just use pre-calculated values from Weekly_Summary
 
         # FIXED: Create proper machine utilization for ALL 8 stages
         self._create_machine_utilization_fixed()
@@ -680,56 +681,56 @@ class FixedExecutiveReportGenerator:
             if week is None or week not in self.weeks:
                 continue
             
-            # Calculate utilization for each stage as: (actual / capacity) * 100
+            # Use pre-calculated utilization percentages from Weekly_Summary
+            # These are calculated correctly in production_plan_test.py based on actual machine capacity
             util_row = {'Week': week}
-            
-            # Casting (in tons)
-            casting_tons = row.get('Casting_Tons', 0)
-            util_row['Casting_Util_%'] = (casting_tons / self.capacity_limits['Casting_Tons'] * 100) if casting_tons > 0 else 0
-            util_row['Casting_Load_Tons'] = casting_tons
-            util_row['Casting_Cap_Tons'] = self.capacity_limits['Casting_Tons']
-            
-            # Grinding (in units)
-            grinding_units = row.get('Grinding_Units', 0)
-            util_row['Grinding_Util_%'] = (grinding_units / self.capacity_limits['Grinding_Units'] * 100) if grinding_units > 0 else 0
-            util_row['Grinding_Load_Units'] = grinding_units
-            util_row['Grinding_Cap_Units'] = self.capacity_limits['Grinding_Units']
-            
-            # MC1 (Machining Stage 1)
-            mc1_units = row.get('MC1_Units', 0)
-            util_row['MC1_Util_%'] = (mc1_units / self.capacity_limits['MC1_Units'] * 100) if mc1_units > 0 else 0
-            util_row['MC1_Load_Units'] = mc1_units
-            util_row['MC1_Cap_Units'] = self.capacity_limits['MC1_Units']
-            
-            # MC2 (Machining Stage 2) - FIXED: NOW INCLUDED
-            mc2_units = row.get('MC2_Units', 0)
-            util_row['MC2_Util_%'] = (mc2_units / self.capacity_limits['MC2_Units'] * 100) if mc2_units > 0 else 0
-            util_row['MC2_Load_Units'] = mc2_units
-            util_row['MC2_Cap_Units'] = self.capacity_limits['MC2_Units']
-            
-            # MC3 (Machining Stage 3) - FIXED: NOW INCLUDED
-            mc3_units = row.get('MC3_Units', 0)
-            util_row['MC3_Util_%'] = (mc3_units / self.capacity_limits['MC3_Units'] * 100) if mc3_units > 0 else 0
-            util_row['MC3_Load_Units'] = mc3_units
-            util_row['MC3_Cap_Units'] = self.capacity_limits['MC3_Units']
-            
-            # SP1 (Painting Stage 1 - Primer) - FIXED: NOW INCLUDED
-            sp1_units = row.get('SP1_Units', 0)
-            util_row['SP1_Util_%'] = (sp1_units / self.capacity_limits['SP1_Units'] * 100) if sp1_units > 0 else 0
-            util_row['SP1_Load_Units'] = sp1_units
-            util_row['SP1_Cap_Units'] = self.capacity_limits['SP1_Units']
-            
-            # SP2 (Painting Stage 2 - Intermediate) - FIXED: NOW INCLUDED
-            sp2_units = row.get('SP2_Units', 0)
-            util_row['SP2_Util_%'] = (sp2_units / self.capacity_limits['SP2_Units'] * 100) if sp2_units > 0 else 0
-            util_row['SP2_Load_Units'] = sp2_units
-            util_row['SP2_Cap_Units'] = self.capacity_limits['SP2_Units']
-            
-            # SP3 (Painting Stage 3 - Top Coat) - FIXED: NOW INCLUDED
-            sp3_units = row.get('SP3_Units', 0)
-            util_row['SP3_Util_%'] = (sp3_units / self.capacity_limits['SP3_Units'] * 100) if sp3_units > 0 else 0
-            util_row['SP3_Load_Units'] = sp3_units
-            util_row['SP3_Cap_Units'] = self.capacity_limits['SP3_Units']
+
+            # Casting (use pre-calculated from weekly summary)
+            util_row['Casting_Util_%'] = row.get('Casting_%', 0)
+            util_row['Casting_Load_Tons'] = row.get('Casting_Tons', 0)
+            util_row['Casting_Cap_Tons'] = 800  # From production_plan_test.py
+
+            # Grinding (use pre-calculated utilization from Weekly_Summary)
+            util_row['Grinding_Util_%'] = row.get('Grinding_Util_%', 0)
+            util_row['Grinding_Load_Hours'] = row.get('Grinding_Hours', 0)
+            util_row['Grinding_Cap_Hours'] = row.get('Grinding_Capacity_Hours', 0)
+            util_row['Grinding_Load_Units'] = row.get('Grinding_Units', 0)
+
+            # MC1 (use pre-calculated)
+            util_row['MC1_Util_%'] = row.get('MC1_Util_%', 0)
+            util_row['MC1_Load_Hours'] = row.get('MC1_Hours', 0)
+            util_row['MC1_Cap_Hours'] = row.get('MC1_Capacity_Hours', 0)
+            util_row['MC1_Load_Units'] = row.get('MC1_Units', 0)
+
+            # MC2 (use pre-calculated)
+            util_row['MC2_Util_%'] = row.get('MC2_Util_%', 0)
+            util_row['MC2_Load_Hours'] = row.get('MC2_Hours', 0)
+            util_row['MC2_Cap_Hours'] = row.get('MC2_Capacity_Hours', 0)
+            util_row['MC2_Load_Units'] = row.get('MC2_Units', 0)
+
+            # MC3 (use pre-calculated)
+            util_row['MC3_Util_%'] = row.get('MC3_Util_%', 0)
+            util_row['MC3_Load_Hours'] = row.get('MC3_Hours', 0)
+            util_row['MC3_Cap_Hours'] = row.get('MC3_Capacity_Hours', 0)
+            util_row['MC3_Load_Units'] = row.get('MC3_Units', 0)
+
+            # SP1 (use pre-calculated)
+            util_row['SP1_Util_%'] = row.get('SP1_Util_%', 0)
+            util_row['SP1_Load_Hours'] = row.get('SP1_Hours', 0)
+            util_row['SP1_Cap_Hours'] = row.get('SP1_Capacity_Hours', 0)
+            util_row['SP1_Load_Units'] = row.get('SP1_Units', 0)
+
+            # SP2 (use pre-calculated)
+            util_row['SP2_Util_%'] = row.get('SP2_Util_%', 0)
+            util_row['SP2_Load_Hours'] = row.get('SP2_Hours', 0)
+            util_row['SP2_Cap_Hours'] = row.get('SP2_Capacity_Hours', 0)
+            util_row['SP2_Load_Units'] = row.get('SP2_Units', 0)
+
+            # SP3 (use pre-calculated)
+            util_row['SP3_Util_%'] = row.get('SP3_Util_%', 0)
+            util_row['SP3_Load_Hours'] = row.get('SP3_Hours', 0)
+            util_row['SP3_Cap_Hours'] = row.get('SP3_Capacity_Hours', 0)
+            util_row['SP3_Load_Units'] = row.get('SP3_Units', 0)
 
             # Big/Small moulding lines (from weekly summary)
             if 'Big_Line_Util_%' in row and pd.notna(row.get('Big_Line_Util_%')):

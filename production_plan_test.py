@@ -2190,7 +2190,73 @@ class ComprehensiveResultsAnalyzer:
         big_line_cap_min = self.config.BIG_LINE_HOURS_PER_WEEK * 60
         small_line_cap_min = self.config.SMALL_LINE_HOURS_PER_WEEK * 60
         vacuum_penalty = self.config.VACUUM_CAPACITY_PENALTY if self.config.VACUUM_CAPACITY_PENALTY else 1.0
-        
+
+        # Helper function to calculate stage hours and utilization
+        def calculate_stage_util(stage_df, stage_name):
+            """Calculate hours used and utilization for a stage."""
+            total_minutes = 0.0
+            for _, row in stage_df.iterrows():
+                part = row.get('Part')
+                units = row.get('Units', 0)
+                params = self.params.get(part, {})
+
+                # Get cycle time based on stage
+                if stage_name == 'grinding':
+                    cycle_time = params.get('grinding_cycle', 0)
+                elif stage_name == 'mc1':
+                    cycle_time = params.get('mc1_cycle', 0)
+                elif stage_name == 'mc2':
+                    cycle_time = params.get('mc2_cycle', 0)
+                elif stage_name == 'mc3':
+                    cycle_time = params.get('mc3_cycle', 0)
+                elif stage_name == 'sp1':
+                    cycle_time = params.get('sp1_cycle', 0)
+                elif stage_name == 'sp2':
+                    cycle_time = params.get('sp2_cycle', 0)
+                elif stage_name == 'sp3':
+                    cycle_time = params.get('sp3_cycle', 0)
+                else:
+                    cycle_time = 0
+
+                total_minutes += units * cycle_time
+
+            # Get capacity from machine manager
+            if stage_name == 'grinding':
+                resource_code = 'GR'  # Grinding resource code
+            elif stage_name == 'mc1':
+                resource_code = 'MC1'
+            elif stage_name == 'mc2':
+                resource_code = 'MC2'
+            elif stage_name == 'mc3':
+                resource_code = 'MC3'
+            elif stage_name == 'sp1':
+                resource_code = 'SP1'
+            elif stage_name == 'sp2':
+                resource_code = 'SP2'
+            elif stage_name == 'sp3':
+                resource_code = 'SP3'
+            else:
+                resource_code = None
+
+            # Get total weekly capacity for this resource
+            capacity_hours = 0
+            if resource_code:
+                # Sum capacity across all machines with this operation
+                for machine_code, machine_data in self.machine_manager.machines.items():
+                    operation = machine_data.get('operation', '')
+                    if resource_code in operation or resource_code in machine_code:
+                        capacity_hours += machine_data.get('weekly_hours', 0)
+
+            capacity_minutes = capacity_hours * 60
+            hours_used = total_minutes / 60.0
+
+            if capacity_minutes > 0:
+                utilization = (total_minutes / capacity_minutes) * 100
+            else:
+                utilization = 0
+
+            return hours_used, utilization, capacity_hours
+
         for w in self.weeks:
             wc = stage_plans['casting'][stage_plans['casting']['Week'] == w]
             wg = stage_plans['grinding'][stage_plans['grinding']['Week'] == w]
@@ -2201,11 +2267,12 @@ class ComprehensiveResultsAnalyzer:
             ws2 = stage_plans['sp2'][stage_plans['sp2']['Week'] == w]
             ws3 = stage_plans['sp3'][stage_plans['sp3']['Week'] == w]
             wd = stage_plans['delivery'][stage_plans['delivery']['Week'] == w]
-            
+
             wc_small = wc[wc['Moulding_Line'].str.contains('Small Line', na=False)]
             wc_big = wc[wc['Moulding_Line'].str.contains('Big Line', na=False)]
             wc_vacuum = wc[wc['Requires_Vacuum'] == True]
 
+            # Casting line calculations (existing logic)
             big_line_minutes = 0.0
             small_line_minutes = 0.0
 
@@ -2231,7 +2298,16 @@ class ComprehensiveResultsAnalyzer:
             small_line_hours = small_line_minutes / 60.0
             big_line_util = (big_line_minutes / big_line_cap_min * 100) if big_line_cap_min > 0 else 0
             small_line_util = (small_line_minutes / small_line_cap_min * 100) if small_line_cap_min > 0 else 0
-            
+
+            # Calculate utilization for other stages
+            gr_hours, gr_util, gr_cap = calculate_stage_util(wg, 'grinding')
+            mc1_hours, mc1_util, mc1_cap = calculate_stage_util(wm1, 'mc1')
+            mc2_hours, mc2_util, mc2_cap = calculate_stage_util(wm2, 'mc2')
+            mc3_hours, mc3_util, mc3_cap = calculate_stage_util(wm3, 'mc3')
+            sp1_hours, sp1_util, sp1_cap = calculate_stage_util(ws1, 'sp1')
+            sp2_hours, sp2_util, sp2_cap = calculate_stage_util(ws2, 'sp2')
+            sp3_hours, sp3_util, sp3_cap = calculate_stage_util(ws3, 'sp3')
+
             weekly_data.append({
                 'Week': w,
                 'Casting_Units': wc['Units'].sum(),
@@ -2247,15 +2323,36 @@ class ComprehensiveResultsAnalyzer:
                 'Small_Line_Capacity_Hours': self.config.SMALL_LINE_HOURS_PER_WEEK,
                 'Vacuum_Units': wc_vacuum['Units'].sum(),
                 'Grinding_Units': wg['Units'].sum(),
+                'Grinding_Hours': round(gr_hours, 2),
+                'Grinding_Util_%': round(gr_util, 1),
+                'Grinding_Capacity_Hours': round(gr_cap, 2),
                 'MC1_Units': wm1['Units'].sum(),
+                'MC1_Hours': round(mc1_hours, 2),
+                'MC1_Util_%': round(mc1_util, 1),
+                'MC1_Capacity_Hours': round(mc1_cap, 2),
                 'MC2_Units': wm2['Units'].sum(),
+                'MC2_Hours': round(mc2_hours, 2),
+                'MC2_Util_%': round(mc2_util, 1),
+                'MC2_Capacity_Hours': round(mc2_cap, 2),
                 'MC3_Units': wm3['Units'].sum(),
+                'MC3_Hours': round(mc3_hours, 2),
+                'MC3_Util_%': round(mc3_util, 1),
+                'MC3_Capacity_Hours': round(mc3_cap, 2),
                 'SP1_Units': ws1['Units'].sum(),
+                'SP1_Hours': round(sp1_hours, 2),
+                'SP1_Util_%': round(sp1_util, 1),
+                'SP1_Capacity_Hours': round(sp1_cap, 2),
                 'SP2_Units': ws2['Units'].sum(),
+                'SP2_Hours': round(sp2_hours, 2),
+                'SP2_Util_%': round(sp2_util, 1),
+                'SP2_Capacity_Hours': round(sp2_cap, 2),
                 'SP3_Units': ws3['Units'].sum(),
+                'SP3_Hours': round(sp3_hours, 2),
+                'SP3_Util_%': round(sp3_util, 1),
+                'SP3_Capacity_Hours': round(sp3_cap, 2),
                 'Delivery_Units': wd['Units'].sum()
             })
-        
+
         return pd.DataFrame(weekly_data)
     
     def _analyze_changeovers(self):
