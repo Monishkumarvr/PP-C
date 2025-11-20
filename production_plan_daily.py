@@ -606,44 +606,54 @@ class DailyResultsAnalyzer:
                     'Requires_Vacuum': p.get('requires_vacuum', False)
                 })
             
-            stage_plans[stage_name] = pd.DataFrame(stage_data)
+            # Create DataFrame with proper columns even if empty
+            if stage_data:
+                stage_plans[stage_name] = pd.DataFrame(stage_data)
+            else:
+                # Empty DataFrame with correct columns
+                stage_plans[stage_name] = pd.DataFrame(columns=[
+                    'Part', 'Variant', 'Date', 'Day', 'Deadline_Date', 'Stage',
+                    'Units', 'Unit_Weight_kg', 'Total_Weight_ton', 'Moulding_Line', 'Requires_Vacuum'
+                ])
             print(f"  {stage_label}: {len(stage_data)} daily entries")
-        
+
         return stage_plans
     
     def _generate_daily_summary(self, stage_plans):
         """Generate daily summary across all stages."""
         print("\n✓ Generating daily summary...")
-        
+
         daily_data = []
-        
+
         for d in self.calendar.working_days:
-            dc = stage_plans['casting'][stage_plans['casting']['Date'] == d]
-            dg = stage_plans['grinding'][stage_plans['grinding']['Date'] == d]
-            dm1 = stage_plans['mc1'][stage_plans['mc1']['Date'] == d]
-            dm2 = stage_plans['mc2'][stage_plans['mc2']['Date'] == d]
-            dm3 = stage_plans['mc3'][stage_plans['mc3']['Date'] == d]
-            ds1 = stage_plans['sp1'][stage_plans['sp1']['Date'] == d]
-            ds2 = stage_plans['sp2'][stage_plans['sp2']['Date'] == d]
-            ds3 = stage_plans['sp3'][stage_plans['sp3']['Date'] == d]
-            dd = stage_plans['delivery'][stage_plans['delivery']['Date'] == d]
-            
+            # Filter stage plans for this day (DataFrames now have proper columns even if empty)
+            dc = stage_plans['casting'][stage_plans['casting']['Date'] == d] if len(stage_plans['casting']) > 0 else stage_plans['casting']
+            dg = stage_plans['grinding'][stage_plans['grinding']['Date'] == d] if len(stage_plans['grinding']) > 0 else stage_plans['grinding']
+            dm1 = stage_plans['mc1'][stage_plans['mc1']['Date'] == d] if len(stage_plans['mc1']) > 0 else stage_plans['mc1']
+            dm2 = stage_plans['mc2'][stage_plans['mc2']['Date'] == d] if len(stage_plans['mc2']) > 0 else stage_plans['mc2']
+            dm3 = stage_plans['mc3'][stage_plans['mc3']['Date'] == d] if len(stage_plans['mc3']) > 0 else stage_plans['mc3']
+            ds1 = stage_plans['sp1'][stage_plans['sp1']['Date'] == d] if len(stage_plans['sp1']) > 0 else stage_plans['sp1']
+            ds2 = stage_plans['sp2'][stage_plans['sp2']['Date'] == d] if len(stage_plans['sp2']) > 0 else stage_plans['sp2']
+            ds3 = stage_plans['sp3'][stage_plans['sp3']['Date'] == d] if len(stage_plans['sp3']) > 0 else stage_plans['sp3']
+            dd = stage_plans['delivery'][stage_plans['delivery']['Date'] == d] if len(stage_plans['delivery']) > 0 else stage_plans['delivery']
+
+            # Sum units and weights (empty DataFrames return 0 for sum)
             daily_data.append({
                 'Date': d,
                 'Day': d.strftime('%A'),
                 'Is_Holiday': 'No',
-                'Casting_Tons': dc['Total_Weight_ton'].sum(),
-                'Casting_Units': dc['Units'].sum(),
-                'Grinding_Units': dg['Units'].sum(),
-                'MC1_Units': dm1['Units'].sum(),
-                'MC2_Units': dm2['Units'].sum(),
-                'MC3_Units': dm3['Units'].sum(),
-                'SP1_Units': ds1['Units'].sum(),
-                'SP2_Units': ds2['Units'].sum(),
-                'SP3_Units': ds3['Units'].sum(),
-                'Delivery_Units': dd['Units'].sum()
+                'Casting_Tons': dc['Total_Weight_ton'].sum() if 'Total_Weight_ton' in dc.columns else 0,
+                'Casting_Units': dc['Units'].sum() if 'Units' in dc.columns else 0,
+                'Grinding_Units': dg['Units'].sum() if 'Units' in dg.columns else 0,
+                'MC1_Units': dm1['Units'].sum() if 'Units' in dm1.columns else 0,
+                'MC2_Units': dm2['Units'].sum() if 'Units' in dm2.columns else 0,
+                'MC3_Units': dm3['Units'].sum() if 'Units' in dm3.columns else 0,
+                'SP1_Units': ds1['Units'].sum() if 'Units' in ds1.columns else 0,
+                'SP2_Units': ds2['Units'].sum() if 'Units' in ds2.columns else 0,
+                'SP3_Units': ds3['Units'].sum() if 'Units' in ds3.columns else 0,
+                'Delivery_Units': dd['Units'].sum() if 'Units' in dd.columns else 0
             })
-        
+
         return pd.DataFrame(daily_data)
     
     def _aggregate_to_weekly(self, daily_summary):
