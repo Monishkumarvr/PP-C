@@ -394,98 +394,153 @@ class DailyOptimizationModel:
         print(f"  ✓ Added {len(self.machine_manager.machines) * len(self.working_days)} machine capacity constraints")
     
     def _add_flow_constraints(self):
-        """Add material flow constraints with daily lead times."""
-        print("\n🔄 Adding flow constraints with daily lead times...")
-        
+        """Add CUMULATIVE material flow constraints (like weekly optimizer)."""
+        print("\n🔄 Adding CUMULATIVE flow constraints with stage seriality...")
+
+        cnt = 0
+
+        # Group variants by part for aggregate constraints
+        variants_by_part = defaultdict(list)
         for v in self.daily_demand.keys():
             part, _ = self.part_day_mapping[v]
-            p = self.params.get(part, {})
-            
-            # Get WIP initialization
-            wip = self.wip_init.get(part, {})
-            start_qty = self.stage_start_qty.get(v, {})
-            
-            # Determine which stages this variant needs
-            need_casting = start_qty.get('casting', 0) > 0
-            need_grinding = start_qty.get('grinding', 0) > 0
-            need_mc1 = start_qty.get('mc1', 0) > 0
-            need_mc2 = start_qty.get('mc2', 0) > 0
-            need_mc3 = start_qty.get('mc3', 0) > 0
-            need_sp1 = start_qty.get('sp1', 0) > 0
-            need_sp2 = start_qty.get('sp2', 0) > 0
-            need_sp3 = start_qty.get('sp3', 0) > 0
-            
+            if part in self.params:
+                variants_by_part[part].append(v)
+
+        # Add PART-LEVEL cumulative constraints for WIP-to-production transitions
+        for part, variants in variants_by_part.items():
+            p = self.params[part]
+            wip = self.wip_init.get(part, {'FG': 0, 'SP': 0, 'MC': 0, 'GR': 0, 'CS': 0})
+
             # Lead times (in days)
-            cooling_days = max(1, int(p.get('cooling_time', 0) / 24))  # Convert hours to days
-            grinding_to_mc1_days = 1
-            mc_stage_days = 1
-            paint_drying_days = max(1, int(p.get('sp1_dry_time', 0) / 24))  # SP1->SP2 drying
-            
+            cooling_days = max(1, int(p.get('cooling_time', 0) / 24))
+
             for d_idx, d in enumerate(self.working_days):
-                # Casting -> Grinding (after cooling)
-                if need_casting and need_grinding and d_idx >= cooling_days:
-                    casting_day = self.working_days[d_idx - cooling_days]
-                    self.model += (
-                        self.x_grinding[(v, d)] <= self.x_casting[(v, casting_day)],
-                        f"Flow_Cast_Grind_{v}_{d.strftime('%Y%m%d')}"
-                    )
-                
-                # Grinding -> MC1
-                if need_grinding and need_mc1 and d_idx >= grinding_to_mc1_days:
-                    grinding_day = self.working_days[d_idx - grinding_to_mc1_days]
-                    self.model += (
-                        self.x_mc1[(v, d)] <= self.x_grinding[(v, grinding_day)],
-                        f"Flow_Grind_MC1_{v}_{d.strftime('%Y%m%d')}"
-                    )
-                
-                # MC1 -> MC2 -> MC3 (sequential)
-                if need_mc1 and need_mc2 and d_idx >= mc_stage_days:
-                    mc1_day = self.working_days[d_idx - mc_stage_days]
-                    self.model += (
-                        self.x_mc2[(v, d)] <= self.x_mc1[(v, mc1_day)],
-                        f"Flow_MC1_MC2_{v}_{d.strftime('%Y%m%d')}"
-                    )
-                
-                if need_mc2 and need_mc3 and d_idx >= mc_stage_days:
-                    mc2_day = self.working_days[d_idx - mc_stage_days]
-                    self.model += (
-                        self.x_mc3[(v, d)] <= self.x_mc2[(v, mc2_day)],
-                        f"Flow_MC2_MC3_{v}_{d.strftime('%Y%m%d')}"
-                    )
-                
-                # MC3 or GR -> SP1 (depending on routing)
-                source_stage = self.x_mc3[(v, d)] if need_mc3 else self.x_grinding[(v, d)]
-                if need_sp1:
-                    self.model += (
-                        self.x_sp1[(v, d)] <= source_stage,
-                        f"Flow_toSP1_{v}_{d.strftime('%Y%m%d')}"
-                    )
-                
-                # SP1 -> SP2 -> SP3 (with drying time)
-                if need_sp1 and need_sp2 and d_idx >= paint_drying_days:
-                    sp1_day = self.working_days[d_idx - paint_drying_days]
-                    self.model += (
-                        self.x_sp2[(v, d)] <= self.x_sp1[(v, sp1_day)],
-                        f"Flow_SP1_SP2_{v}_{d.strftime('%Y%m%d')}"
-                    )
-                
-                if need_sp2 and need_sp3 and d_idx >= paint_drying_days:
-                    sp2_day = self.working_days[d_idx - paint_drying_days]
-                    self.model += (
-                        self.x_sp3[(v, d)] <= self.x_sp2[(v, sp2_day)],
-                        f"Flow_SP2_SP3_{v}_{d.strftime('%Y%m%d')}"
-                    )
-                
-                # Last stage -> Delivery
-                final_stage = self.x_sp3[(v, d)] if need_sp3 else (
-                    self.x_mc3[(v, d)] if need_mc3 else self.x_grinding[(v, d)]
-                )
+                d_cooled_idx = max(0, d_idx - cooling_days)
+                days_up_to_d = self.working_days[:d_idx + 1]
+                days_up_to_cooled = self.working_days[:d_cooled_idx + 1]
+
+                # CUMULATIVE: Total grinding <= CS WIP + total casting (with cooling delay)
                 self.model += (
-                    self.x_delivery[(v, d)] <= final_stage,
-                    f"Flow_toDel_{v}_{d.strftime('%Y%m%d')}"
+                    pulp.lpSum(self.x_grinding[(v, t)] for v in variants for t in days_up_to_d)
+                    <= wip['CS'] + pulp.lpSum(self.x_casting[(v, t)] for v in variants for t in days_up_to_cooled),
+                    f"Cum_Cast_Grind_{part}_D{d_idx}"
                 )
-        
-        print("  ✓ Added flow constraints for all stages")
+                cnt += 1
+
+                # CUMULATIVE: Total MC1 <= GR WIP + total grinding
+                if p.get('has_mc1', True):
+                    self.model += (
+                        pulp.lpSum(self.x_mc1[(v, t)] for v in variants for t in days_up_to_d)
+                        <= wip['GR'] + pulp.lpSum(self.x_grinding[(v, t)] for v in variants for t in days_up_to_d),
+                        f"Cum_Grind_MC1_{part}_D{d_idx}"
+                    )
+                    cnt += 1
+
+                # CUMULATIVE: Total SP1 <= MC WIP + total last machining stage
+                if p.get('has_mc3', True):
+                    mach_source = self.x_mc3
+                    has_machining = True
+                elif p.get('has_mc2', True):
+                    mach_source = self.x_mc2
+                    has_machining = True
+                elif p.get('has_mc1', True):
+                    mach_source = self.x_mc1
+                    has_machining = True
+                else:
+                    mach_source = self.x_grinding
+                    has_machining = False
+
+                if has_machining:
+                    self.model += (
+                        pulp.lpSum(self.x_sp1[(v, t)] for v in variants for t in days_up_to_d)
+                        <= wip['MC'] + pulp.lpSum(mach_source[(v, t)] for v in variants for t in days_up_to_d),
+                        f"Cum_Mach_SP1_{part}_D{d_idx}"
+                    )
+                else:
+                    self.model += (
+                        pulp.lpSum(self.x_sp1[(v, t)] for v in variants for t in days_up_to_d)
+                        <= wip['MC'] + wip['GR'] + pulp.lpSum(mach_source[(v, t)] for v in variants for t in days_up_to_d),
+                        f"Cum_Grind_SP1_{part}_D{d_idx}"
+                    )
+                cnt += 1
+
+                # CUMULATIVE: Total delivery <= FG+SP WIP + total last painting stage
+                if p.get('has_sp3', True):
+                    paint_source = self.x_sp3
+                elif p.get('has_sp2', True):
+                    paint_source = self.x_sp2
+                else:
+                    paint_source = self.x_sp1
+
+                self.model += (
+                    pulp.lpSum(self.x_delivery[(v, t)] for v in variants for t in days_up_to_d)
+                    <= wip['FG'] + wip['SP'] + pulp.lpSum(paint_source[(v, t)] for v in variants for t in days_up_to_d),
+                    f"Cum_Paint_Deliv_{part}_D{d_idx}"
+                )
+                cnt += 1
+
+        # Add VARIANT-LEVEL cumulative constraints for internal stage seriality
+        for v in self.daily_demand.keys():
+            part, _ = self.part_day_mapping[v]
+            if part not in self.params:
+                continue
+
+            p = self.params[part]
+
+            for d_idx, d in enumerate(self.working_days):
+                days_up_to_d = self.working_days[:d_idx + 1]
+
+                # CUMULATIVE: MC2 <= MC1
+                if p.get('has_mc2', True) and p.get('has_mc1', True):
+                    self.model += (
+                        pulp.lpSum(self.x_mc2[(v, t)] for t in days_up_to_d)
+                        <= pulp.lpSum(self.x_mc1[(v, t)] for t in days_up_to_d),
+                        f"Cum_MC1_MC2_{v}_D{d_idx}"
+                    )
+                    cnt += 1
+
+                # CUMULATIVE: MC3 <= MC2 or MC1
+                if p.get('has_mc3', True):
+                    if p.get('has_mc2', True):
+                        self.model += (
+                            pulp.lpSum(self.x_mc3[(v, t)] for t in days_up_to_d)
+                            <= pulp.lpSum(self.x_mc2[(v, t)] for t in days_up_to_d),
+                            f"Cum_MC2_MC3_{v}_D{d_idx}"
+                        )
+                    elif p.get('has_mc1', True):
+                        self.model += (
+                            pulp.lpSum(self.x_mc3[(v, t)] for t in days_up_to_d)
+                            <= pulp.lpSum(self.x_mc1[(v, t)] for t in days_up_to_d),
+                            f"Cum_MC1_MC3_{v}_D{d_idx}"
+                        )
+                    cnt += 1
+
+                # CUMULATIVE: SP2 <= SP1
+                if p.get('has_sp2', True):
+                    self.model += (
+                        pulp.lpSum(self.x_sp2[(v, t)] for t in days_up_to_d)
+                        <= pulp.lpSum(self.x_sp1[(v, t)] for t in days_up_to_d),
+                        f"Cum_SP1_SP2_{v}_D{d_idx}"
+                    )
+                    cnt += 1
+
+                # CUMULATIVE: SP3 <= SP2 or SP1
+                if p.get('has_sp3', True):
+                    if p.get('has_sp2', True):
+                        self.model += (
+                            pulp.lpSum(self.x_sp3[(v, t)] for t in days_up_to_d)
+                            <= pulp.lpSum(self.x_sp2[(v, t)] for t in days_up_to_d),
+                            f"Cum_SP2_SP3_{v}_D{d_idx}"
+                        )
+                    else:
+                        self.model += (
+                            pulp.lpSum(self.x_sp3[(v, t)] for t in days_up_to_d)
+                            <= pulp.lpSum(self.x_sp1[(v, t)] for t in days_up_to_d),
+                            f"Cum_SP1_SP3_{v}_D{d_idx}"
+                        )
+                    cnt += 1
+
+        print(f"  ✓ Added {cnt:,} cumulative flow constraints (forces production through all stages)")
     
     def _add_demand_constraints(self):
         """Add demand fulfillment and delivery timing constraints."""
