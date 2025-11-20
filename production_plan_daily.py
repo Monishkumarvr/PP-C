@@ -91,11 +91,12 @@ class DailyProductionConfig:
         self.DEFAULT_GRINDING_TO_MC1_DAYS = 1
         self.DEFAULT_MC_STAGE_DAYS = 1  # Between MC stages
         self.DEFAULT_PAINT_DRYING_DAYS = 1  # Between paint stages
-        
-        # Penalties (daily-based)
+
+        # Penalties (daily-based) - MATCHED TO WEEKLY OPTIMIZER
         self.UNMET_DEMAND_PENALTY = 200000
-        self.LATENESS_PENALTY_PER_DAY = 5000  # Per day late
-        self.INVENTORY_HOLDING_COST_PER_DAY = 0.15  # Per unit per day
+        self.LATENESS_PENALTY_PER_DAY = 20000  # ~150k/week ÷ 7 ≈ 21,429/day (increased from 5k)
+        self.INVENTORY_HOLDING_COST_PER_DAY = 0.14  # ~1/week ÷ 7 ≈ 0.14/day
+        self.MAX_EARLY_DAYS = 56  # 8 weeks × 7 days (allow up to 8 weeks early delivery)
         self.SETUP_PENALTY = 5
 
         # Penalty compatibility (weekly equivalents for existing code)
@@ -211,13 +212,8 @@ class DailyOptimizationModel:
         self.x_delivery = {}
         self.x_unmet = {}
         self.x_late_days = {}
-        
-        # Inventory tracking
-        self.inv_cs = {}
-        self.inv_gr = {}
-        self.inv_mc = {}
-        self.inv_sp = {}
-        self.inv_fg = {}
+
+        # Note: Removed inventory stage tracking (not constrained, cost now based on delivery timing)
     
     def build_and_solve(self):
         """Build complete model and solve."""
@@ -325,47 +321,42 @@ class DailyOptimizationModel:
         for v in variants:
             self.x_unmet[v] = pulp.LpVariable(f"unmet_{v}", 0, None)
             self.x_late_days[v] = pulp.LpVariable(f"late_{v}", 0, None)
-        
-        # Inventory variables
-        for v in variants:
-            part, _ = self.part_day_mapping[v]
-            for d in days:
-                self.inv_cs[(part, d)] = pulp.LpVariable(f"inv_cs_{part}_{d.strftime('%Y%m%d')}", 0, None)
-                self.inv_gr[(part, d)] = pulp.LpVariable(f"inv_gr_{part}_{d.strftime('%Y%m%d')}", 0, None)
-                self.inv_mc[(part, d)] = pulp.LpVariable(f"inv_mc_{part}_{d.strftime('%Y%m%d')}", 0, None)
-                self.inv_sp[(part, d)] = pulp.LpVariable(f"inv_sp_{part}_{d.strftime('%Y%m%d')}", 0, None)
-                self.inv_fg[(part, d)] = pulp.LpVariable(f"inv_fg_{part}_{d.strftime('%Y%m%d')}", 0, None)
-        
-        print(f"  ✓ Created {len(self.model.variables())} decision variables")
+
+        # Note: Removed inventory stage variables (inv_cs, inv_gr, etc.) since they weren't constrained
+        # Inventory cost is now based on early delivery timing (like weekly optimizer)
+
+        print(f"  ✓ Created decision variables")
     
     def _add_objective_function(self):
-        """Add objective: minimize cost."""
+        """Add objective: minimize cost (matching weekly optimizer logic)."""
         print("\n🎯 Adding objective function...")
-        
+
+        objective_terms = []
+
         # Unmet demand penalty
-        unmet_cost = pulp.lpSum(
-            self.config.UNMET_DEMAND_PENALTY * self.x_unmet[v]
-            for v in self.daily_demand.keys()
-        )
-        
-        # Lateness penalty
-        late_cost = pulp.lpSum(
-            self.config.LATENESS_PENALTY_PER_DAY * self.x_late_days[v]
-            for v in self.daily_demand.keys()
-        )
-        
-        # Inventory holding cost
-        inv_cost = pulp.lpSum(
-            self.config.INVENTORY_HOLDING_COST_PER_DAY * (
-                self.inv_cs[(part, d)] + self.inv_gr[(part, d)] + 
-                self.inv_mc[(part, d)] + self.inv_sp[(part, d)] + self.inv_fg[(part, d)]
-            )
-            for part in set(p for p, _ in self.part_day_mapping.values())
-            for d in self.working_days
-        )
-        
-        self.model += unmet_cost + late_cost + inv_cost, "Total_Cost"
-        print("  ✓ Objective function added")
+        for v in self.daily_demand.keys():
+            objective_terms.append(self.config.UNMET_DEMAND_PENALTY * self.x_unmet[v])
+
+        # Lateness penalty (for deliveries after due date)
+        for v in self.daily_demand.keys():
+            objective_terms.append(self.config.LATENESS_PENALTY_PER_DAY * self.x_late_days[v])
+
+        # Inventory holding cost - ONLY penalize deliveries > MAX_EARLY_DAYS (like weekly optimizer)
+        for v in self.daily_demand.keys():
+            part, due_day = self.part_day_mapping[v]
+            due_day_idx = self.day_index[due_day]
+
+            for d_idx, d in enumerate(self.working_days):
+                days_early = due_day_idx - d_idx
+                # Only penalize if delivering TOO early (beyond MAX_EARLY_DAYS buffer)
+                if days_early > self.config.MAX_EARLY_DAYS:
+                    excess_early_days = days_early - self.config.MAX_EARLY_DAYS
+                    objective_terms.append(
+                        self.config.INVENTORY_HOLDING_COST_PER_DAY * excess_early_days * self.x_delivery[(v, d)]
+                    )
+
+        self.model += pulp.lpSum(objective_terms), "Total_Cost"
+        print("  ✓ Objective function added (with MAX_EARLY_DAYS buffer)")
     
     def _add_capacity_constraints(self):
         """Add daily capacity constraints for all resources."""
