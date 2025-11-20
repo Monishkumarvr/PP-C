@@ -220,8 +220,8 @@ class DailyOptimizationModel:
         self.inv_cs = {}  # CS inventory (casting + CS WIP)
         self.inv_gr = {}  # GR inventory (ground parts)
         self.inv_mc = {}  # MC inventory (machined parts)
-        self.inv_sp = {}  # SP inventory (painted parts)
-        self.inv_fg = {}  # FG inventory (finished goods)
+        # NOTE: inv_sp removed - SP WIP combined with FG (both are finished goods)
+        self.inv_fg = {}  # FG inventory (finished goods, includes FG + SP WIP initially)
     
     def build_and_solve(self):
         """Build complete model and solve."""
@@ -237,7 +237,8 @@ class DailyOptimizationModel:
         self._add_capacity_constraints()
         self._add_box_constraints()
         self._add_inventory_balance_constraints()  # NEW: Hybrid PUSH-PULL inventory tracking
-        self._add_flow_constraints()
+        self._add_stage_seriality_constraints()  # NEW: MC1→MC2→MC3, SP1→SP2→SP3 stage ordering
+        # REMOVED: self._add_flow_constraints()  # Conflicts with inventory balance (part-level redundant)
         self._add_demand_constraints()
 
         print("\n✓ Model built successfully")
@@ -345,14 +346,12 @@ class DailyOptimizationModel:
                 self.inv_mc[(part, d)] = pulp.LpVariable(
                     f"inv_mc_{part}_{d.strftime('%Y%m%d')}", 0, None, cat='Continuous'
                 )
-                self.inv_sp[(part, d)] = pulp.LpVariable(
-                    f"inv_sp_{part}_{d.strftime('%Y%m%d')}", 0, None, cat='Continuous'
-                )
+                # NOTE: inv_sp removed - SP WIP is combined with FG (both are finished goods)
                 self.inv_fg[(part, d)] = pulp.LpVariable(
                     f"inv_fg_{part}_{d.strftime('%Y%m%d')}", 0, None, cat='Continuous'
                 )
 
-        print(f"  ✓ Created decision variables (including {len(parts) * len(days) * 5} inventory variables)")
+        print(f"  ✓ Created decision variables (including {len(parts) * len(days) * 4} inventory variables)")
     
     def _add_objective_function(self):
         """Add objective: minimize cost (matching weekly optimizer logic exactly)."""
@@ -397,8 +396,7 @@ class DailyOptimizationModel:
                 # Small cost to hold WIP inventory (allows speculative processing but penalizes excess)
                 objective_terms.append(
                     self.config.WIP_INVENTORY_COST_PER_DAY * (
-                        self.inv_cs[(part, d)] + self.inv_gr[(part, d)] +
-                        self.inv_mc[(part, d)] + self.inv_sp[(part, d)]
+                        self.inv_cs[(part, d)] + self.inv_gr[(part, d)] + self.inv_mc[(part, d)]
                     )
                 )
 
@@ -578,7 +576,8 @@ class DailyOptimizationModel:
                     )
                     constraints_added += 1
 
-                    # SP Inventory Balance: inv_sp[d] = SP_WIP + (sp1+sp2+sp3)[d] - finished[d]
+                    # FG Inventory Balance: inv_fg[d] = (FG_WIP + SP_WIP) + sp_output[d] - delivery[d]
+                    # NOTE: SP WIP = finished painted parts, same as FG, so combine them
                     # Finished goods come from last SP stage
                     if p.get('has_sp3', True):
                         sp_output = sp3_total
@@ -588,14 +587,7 @@ class DailyOptimizationModel:
                         sp_output = sp1_total
 
                     self.model += (
-                        self.inv_sp[(part, d)] == wip['SP'] + sp1_total + sp2_total + sp3_total - sp_output,
-                        f"InvBal_SP_{part}_D{d_idx}"
-                    )
-                    constraints_added += 1
-
-                    # FG Inventory Balance: inv_fg[d] = FG_WIP + finished[d] - delivery[d]
-                    self.model += (
-                        self.inv_fg[(part, d)] == wip['FG'] + sp_output - delivery_total,
+                        self.inv_fg[(part, d)] == wip['FG'] + wip['SP'] + sp_output - delivery_total,
                         f"InvBal_FG_{part}_D{d_idx}"
                     )
                     constraints_added += 1
@@ -626,7 +618,8 @@ class DailyOptimizationModel:
                     )
                     constraints_added += 1
 
-                    # SP: inv_sp[d] = inv_sp[d-1] + sp_input[d] - sp_output[d]
+                    # FG: inv_fg[d] = inv_fg[d-1] + sp_output[d] - delivery[d]
+                    # Finished goods come from last SP stage
                     if p.get('has_sp3', True):
                         sp_output = sp3_total
                     elif p.get('has_sp2', True):
@@ -635,13 +628,6 @@ class DailyOptimizationModel:
                         sp_output = sp1_total
 
                     self.model += (
-                        self.inv_sp[(part, d)] == self.inv_sp[(part, prev_d)] + sp1_total + sp2_total + sp3_total - sp_output,
-                        f"InvBal_SP_{part}_D{d_idx}"
-                    )
-                    constraints_added += 1
-
-                    # FG: inv_fg[d] = inv_fg[d-1] + sp_output[d] - delivery[d]
-                    self.model += (
                         self.inv_fg[(part, d)] == self.inv_fg[(part, prev_d)] + sp_output - delivery_total,
                         f"InvBal_FG_{part}_D{d_idx}"
                     )
@@ -649,6 +635,75 @@ class DailyOptimizationModel:
 
         print(f"  ✓ Added {constraints_added} inventory balance constraints")
         print(f"  → Enables speculative WIP processing to utilize idle capacity!")
+
+    def _add_stage_seriality_constraints(self):
+        """Add stage seriality constraints (MC1→MC2→MC3, SP1→SP2→SP3) for variants."""
+        print("\n🔄 Adding stage seriality constraints...")
+
+        cnt = 0
+
+        # Add VARIANT-LEVEL cumulative constraints for internal stage seriality
+        for v in self.daily_demand.keys():
+            part, _ = self.part_day_mapping[v]
+            if part not in self.params:
+                continue
+
+            p = self.params[part]
+
+            for d_idx, d in enumerate(self.working_days):
+                days_up_to_d = self.working_days[:d_idx + 1]
+
+                # CUMULATIVE: MC2 <= MC1
+                if p.get('has_mc2', True) and p.get('has_mc1', True):
+                    self.model += (
+                        pulp.lpSum(self.x_mc2[(v, t)] for t in days_up_to_d)
+                        <= pulp.lpSum(self.x_mc1[(v, t)] for t in days_up_to_d),
+                        f"Serial_MC1_MC2_{v}_D{d_idx}"
+                    )
+                    cnt += 1
+
+                # CUMULATIVE: MC3 <= MC2 or MC1
+                if p.get('has_mc3', True):
+                    if p.get('has_mc2', True):
+                        self.model += (
+                            pulp.lpSum(self.x_mc3[(v, t)] for t in days_up_to_d)
+                            <= pulp.lpSum(self.x_mc2[(v, t)] for t in days_up_to_d),
+                            f"Serial_MC2_MC3_{v}_D{d_idx}"
+                        )
+                    elif p.get('has_mc1', True):
+                        self.model += (
+                            pulp.lpSum(self.x_mc3[(v, t)] for t in days_up_to_d)
+                            <= pulp.lpSum(self.x_mc1[(v, t)] for t in days_up_to_d),
+                            f"Serial_MC1_MC3_{v}_D{d_idx}"
+                        )
+                    cnt += 1
+
+                # CUMULATIVE: SP2 <= SP1
+                if p.get('has_sp2', True):
+                    self.model += (
+                        pulp.lpSum(self.x_sp2[(v, t)] for t in days_up_to_d)
+                        <= pulp.lpSum(self.x_sp1[(v, t)] for t in days_up_to_d),
+                        f"Serial_SP1_SP2_{v}_D{d_idx}"
+                    )
+                    cnt += 1
+
+                # CUMULATIVE: SP3 <= SP2 or SP1
+                if p.get('has_sp3', True):
+                    if p.get('has_sp2', True):
+                        self.model += (
+                            pulp.lpSum(self.x_sp3[(v, t)] for t in days_up_to_d)
+                            <= pulp.lpSum(self.x_sp2[(v, t)] for t in days_up_to_d),
+                            f"Serial_SP2_SP3_{v}_D{d_idx}"
+                        )
+                    else:
+                        self.model += (
+                            pulp.lpSum(self.x_sp3[(v, t)] for t in days_up_to_d)
+                            <= pulp.lpSum(self.x_sp1[(v, t)] for t in days_up_to_d),
+                            f"Serial_SP1_SP3_{v}_D{d_idx}"
+                        )
+                    cnt += 1
+
+        print(f"  ✓ Added {cnt:,} stage seriality constraints (MC1→MC2→MC3, SP1→SP2→SP3)")
 
     def _add_flow_constraints(self):
         """Add CUMULATIVE material flow constraints (like weekly optimizer)."""
