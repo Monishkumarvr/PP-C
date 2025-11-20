@@ -218,9 +218,7 @@ class DailyScheduleGenerator:
                         'SP3_Units': weekly_sp3 / num_working_days if num_working_days > 0 else 0,
                         'Delivery_Units': weekly_delivery / num_working_days if num_working_days > 0 else 0,
                         'Big_Line_Hours': weekly_big_line_hours / num_working_days if num_working_days > 0 else 0,
-                        'Small_Line_Hours': weekly_small_line_hours / num_working_days if num_working_days > 0 else 0,
-                        'Big_Line_Util_%': weekly_big_line_util,
-                        'Small_Line_Util_%': weekly_small_line_util
+                        'Small_Line_Hours': weekly_small_line_hours / num_working_days if num_working_days > 0 else 0
                     })
 
             # Add holiday rows for visibility
@@ -248,9 +246,7 @@ class DailyScheduleGenerator:
                         'SP3_Units': 0,
                         'Delivery_Units': 0,
                         'Big_Line_Hours': 0,
-                        'Small_Line_Hours': 0,
-                        'Big_Line_Util_%': weekly_big_line_util,
-                        'Small_Line_Util_%': weekly_small_line_util
+                        'Small_Line_Hours': 0
                     })
 
         return pd.DataFrame(daily_rows).sort_values(['Date'])

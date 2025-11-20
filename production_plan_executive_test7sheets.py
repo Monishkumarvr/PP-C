@@ -2643,10 +2643,13 @@ class FixedExecutiveReportGenerator:
             schedule_rows.append(['', '', '', '', '', '', '', '', '', '', '', ''])
 
         schedule_rows.append(['DAILY PRODUCTION SCHEDULE', '', '', '', '', '', '', '', '', '', '', ''])
+        schedule_rows.append(['NOTE: Daily values are evenly distributed from weekly totals for visualization. Optimizer plans at weekly granularity.', '', '', '', '', '', '', '', '', '', '', ''])
+        schedule_rows.append(['Machine Hours can exceed 24 hrs/day when multiple machines run in parallel (e.g., 2 machines × 12 hrs = 24 machine-hrs).', '', '', '', '', '', '', '', '', '', '', ''])
         schedule_rows.append(['', '', '', '', '', '', '', '', '', '', '', ''])
         schedule_rows.append([
-            'Week', 'Date', 'Day', 'Status', 'Holiday/Event', 'Casting', 'Grinding', 'MC1', 'MC2', 'MC3',
-            'SP1', 'SP2', 'SP3', 'Big Line (hrs)', 'Small Line (hrs)', 'Big Line Util %', 'Small Line Util %'
+            'Week', 'Date', 'Day', 'Status', 'Holiday/Event',
+            'Casting (Tons)', 'Grinding (Units)', 'MC1 (Units)', 'MC2 (Units)', 'MC3 (Units)',
+            'SP1 (Units)', 'SP2 (Units)', 'SP3 (Units)', 'Big Line (Machine-Hrs)', 'Small Line (Machine-Hrs)'
         ])
 
         for idx, row in daily.iterrows():
@@ -2667,8 +2670,6 @@ class FixedExecutiveReportGenerator:
             sp3 = row.get('SP3_Units', 0)
             big_line_hours = row.get('Big_Line_Hours', 0)
             small_line_hours = row.get('Small_Line_Hours', 0)
-            big_line_util = row.get('Big_Line_Util_%', 0)
-            small_line_util = row.get('Small_Line_Util_%', 0)
 
             # Status icon
             if is_holiday == 'Yes':
@@ -2696,9 +2697,7 @@ class FixedExecutiveReportGenerator:
                 f'{sp2:.0f}' if sp2 > 0 else '-',
                 f'{sp3:.0f}' if sp3 > 0 else '-',
                 f'{big_line_hours:.1f}' if big_line_hours else '-',
-                f'{small_line_hours:.1f}' if small_line_hours else '-',
-                f'{big_line_util:.1f}%' if big_line_util else '-',
-                f'{small_line_util:.1f}%' if small_line_util else '-'
+                f'{small_line_hours:.1f}' if small_line_hours else '-'
             ])
 
         # Add weekly aggregates
