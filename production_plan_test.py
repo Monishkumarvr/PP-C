@@ -470,12 +470,29 @@ class ComprehensiveDataLoader:
     def _process_delivery_dates(self):
         """Process and validate delivery dates."""
         date_col = 'Comitted Delivery Date'
-        
+
         if date_col in self.sales_order.columns:
-            self.sales_order['Delivery_Date'] = pd.to_datetime(
-                self.sales_order[date_col],
-                errors='coerce'
-            )
+            # Use explicit format for Indian date format (dd/mm/yyyy)
+            # Try format='%d/%m/%Y' first, then fall back to dayfirst=True
+            try:
+                dates = pd.to_datetime(
+                    self.sales_order[date_col],
+                    format='%d/%m/%Y',
+                    errors='coerce'
+                )
+                if dates.isna().all():  # If all failed, try with dayfirst
+                    dates = pd.to_datetime(
+                        self.sales_order[date_col],
+                        dayfirst=True,
+                        errors='coerce'
+                    )
+                self.sales_order['Delivery_Date'] = dates
+            except:
+                self.sales_order['Delivery_Date'] = pd.to_datetime(
+                    self.sales_order[date_col],
+                    dayfirst=True,
+                    errors='coerce'
+                )
             
             valid_dates = self.sales_order['Delivery_Date'].notna().sum()
             print(f"\n✓ Delivery dates: {valid_dates}/{len(self.sales_order)} valid")

@@ -191,8 +191,14 @@ def validate_uploaded_file(uploaded_file):
                     date_col = col
                     break
             if date_col:
-                # Use dayfirst=True for Indian date format (dd/mm/yyyy)
-                dates = pd.to_datetime(sales_df[date_col], errors='coerce', dayfirst=True)
+                # Use explicit format for Indian date format (dd/mm/yyyy)
+                # Try format='%d/%m/%Y' first, then fall back to dayfirst=True
+                try:
+                    dates = pd.to_datetime(sales_df[date_col], format='%d/%m/%Y', errors='coerce')
+                    if dates.isna().all():  # If all failed, try with dayfirst
+                        dates = pd.to_datetime(sales_df[date_col], dayfirst=True, errors='coerce')
+                except:
+                    dates = pd.to_datetime(sales_df[date_col], dayfirst=True, errors='coerce')
                 validation_results['summary']['earliest_date'] = dates.min()
                 validation_results['summary']['latest_date'] = dates.max()
 
