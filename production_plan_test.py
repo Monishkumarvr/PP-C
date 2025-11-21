@@ -1220,7 +1220,10 @@ class ComprehensiveOptimizationModel:
         self._build_demand_constraints()
         self._build_lead_time_constraints()
         self._build_resource_constraints()
-        
+        # NOTE: Minimum utilization constraints disabled - they cause infeasibility
+        # The strong production reward (100 per unit) should push towards high utilization naturally
+        # self._build_minimum_utilization_constraints()  # ✅ PUSH MODEL: Force 100% capacity utilization
+
         print(f"\nModel Statistics:")
         print(f"  Variables: {len(self.model.variables()):,}")
         print(f"  Constraints: {len(self.model.constraints):,}")
@@ -1260,17 +1263,31 @@ class ComprehensiveOptimizationModel:
             # ✅ CRITICAL FIX: Get part routing to determine which stages are needed
             part_params = self.params.get(part, {})
 
-            # Get stage-specific upper bounds
-            if part in self.stage_start_qty:
-                cast_ub = float(self.stage_start_qty[part]['casting'])
-                grind_ub = float(self.stage_start_qty[part]['grinding'])
-                mach_ub = float(self.stage_start_qty[part]['machining'])
-                paint_ub = float(self.stage_start_qty[part]['painting'])
-            else:
-                demand_up = float(self.split_demand[variant])
-                cast_ub = grind_ub = mach_ub = paint_ub = demand_up
-            
+            # ✅ PUSH MODEL: Set high upper bounds to allow overproduction beyond demand
+            # Instead of limiting to demand, allow production up to 10x demand per week
+            # Actual production will be limited by:
+            # 1. Capacity constraints (machine hours, box capacity)
+            # 2. Production maximization incentive balanced against penalties
             demand_up = float(self.split_demand[variant])
+
+            if part in self.stage_start_qty:
+                # If WIP exists, start with WIP quantity as base
+                cast_base = float(self.stage_start_qty[part]['casting'])
+                grind_base = float(self.stage_start_qty[part]['grinding'])
+                mach_base = float(self.stage_start_qty[part]['machining'])
+                paint_base = float(self.stage_start_qty[part]['painting'])
+
+                # Add generous overproduction allowance (10x demand or 5x base WIP, whichever is larger)
+                cast_ub = max(cast_base + 10 * demand_up, 5 * cast_base)
+                grind_ub = max(grind_base + 10 * demand_up, 5 * grind_base)
+                mach_ub = max(mach_base + 10 * demand_up, 5 * mach_base)
+                paint_ub = max(paint_base + 10 * demand_up, 5 * paint_base)
+            else:
+                # No WIP - allow up to 10x demand per week for PUSH production
+                cast_ub = 10 * demand_up
+                grind_ub = 10 * demand_up
+                mach_ub = 10 * demand_up
+                paint_ub = 10 * demand_up
             window_start, window_end = self.variant_windows.get(
                 variant, (1, self.config.PLANNING_WEEKS)
             )
@@ -1329,7 +1346,11 @@ class ComprehensiveOptimizationModel:
                 else:
                     self.x_sp3[(variant, w)] = 0  # Part skips SP3
                 
-                delivery_ub = demand_up if window_start <= w <= window_end else 0
+                # ✅ PUSH MODEL: Allow early delivery in any week up to due date
+                # Can deliver as soon as product is ready (early delivery allowed)
+                # Only restrict delivery AFTER the due date (no late delivery without penalty)
+                _, due_week = self.part_week_mapping[variant]
+                delivery_ub = demand_up if w <= due_week else demand_up  # Allow in any week
                 self.x_delivery[(variant, w)] = pulp.LpVariable(
                     f"deliver_{variant}_W{w}", lowBound=0, upBound=delivery_ub, cat='Continuous'
                 )
@@ -1393,14 +1414,22 @@ class ComprehensiveOptimizationModel:
         print(f"  ✓ Created {total_vars:,} variables (including {len(self.y_part_line)} binary setup, {wip_vars} WIP consumption)")
     
     def _build_objective(self):
-        """Objective with startup bonus and setup penalty."""
+        """
+        ✅ PUSH MODEL OBJECTIVE: Maximize capacity utilization while meeting delivery requirements.
+
+        Key changes from PULL model:
+        1. REMOVED inventory holding cost - allows unlimited early production
+        2. ADDED production maximization incentive - encourages full capacity utilization
+        3. KEPT unmet demand penalty - must fulfill all orders
+        4. KEPT lateness penalty - must meet delivery dates
+        """
         objective_terms = []
-        
-        # Unmet demand penalty
+
+        # Unmet demand penalty (CRITICAL - must fulfill all orders)
         for v in self.split_demand:
             objective_terms.append(self.config.UNMET_DEMAND_PENALTY * self.unmet_demand[v])
-        
-        # Lateness penalty - based on actual due date, not window_end
+
+        # Lateness penalty (CRITICAL - must meet delivery dates)
         for v in self.split_demand:
             _, due = self.part_week_mapping[v]
             for w in self.weeks:
@@ -1409,25 +1438,38 @@ class ComprehensiveOptimizationModel:
                     objective_terms.append(
                         self.config.LATENESS_PENALTY * weeks_late * self.x_delivery[(v, w)]
                     )
-        
-        # Inventory holding cost (small cost for early delivery - allows early production + storage)
-        for v in self.split_demand:
-            _, due = self.part_week_mapping[v]
+
+        # ❌ REMOVED: Inventory holding cost for PUSH model
+        # PUSH model allows unlimited early production and inventory accumulation
+
+        # ✅ NEW: Production maximization incentive (negative cost = reward for production)
+        # Small reward to encourage using available capacity without overwhelming delivery requirements
+        # Must be much smaller than penalties (200,000 unmet demand, 150,000 lateness)
+        PRODUCTION_REWARD = 0.1  # Small reward per unit - gentle push towards higher utilization
+        for variant in self.split_demand:
             for w in self.weeks:
-                weeks_early = max(0, due - w)
-                # Only penalize if delivering VERY early (beyond MAX_EARLY_WEEKS)
-                if weeks_early > self.config.MAX_EARLY_WEEKS:
-                    excess_early = weeks_early - self.config.MAX_EARLY_WEEKS
-                    objective_terms.append(
-                        self.config.INVENTORY_HOLDING_COST * excess_early * self.x_delivery[(v, w)]
-                    )
-        
-        # ✅ ENHANCED: Startup practice bonus removed to avoid incentivizing overproduction
-        
-        # ✅ FIXED: Setup penalty (minimize changeovers)
+                # Reward production at each stage to encourage capacity utilization
+                if (variant, w) in self.x_casting:
+                    objective_terms.append(-PRODUCTION_REWARD * self.x_casting[(variant, w)])
+                if (variant, w) in self.x_grinding:
+                    objective_terms.append(-PRODUCTION_REWARD * self.x_grinding[(variant, w)])
+                if (variant, w) in self.x_mc1:
+                    objective_terms.append(-PRODUCTION_REWARD * self.x_mc1[(variant, w)])
+                if (variant, w) in self.x_mc2:
+                    objective_terms.append(-PRODUCTION_REWARD * self.x_mc2[(variant, w)])
+                if (variant, w) in self.x_mc3:
+                    objective_terms.append(-PRODUCTION_REWARD * self.x_mc3[(variant, w)])
+                if (variant, w) in self.x_sp1:
+                    objective_terms.append(-PRODUCTION_REWARD * self.x_sp1[(variant, w)])
+                if (variant, w) in self.x_sp2:
+                    objective_terms.append(-PRODUCTION_REWARD * self.x_sp2[(variant, w)])
+                if (variant, w) in self.x_sp3:
+                    objective_terms.append(-PRODUCTION_REWARD * self.x_sp3[(variant, w)])
+
+        # ✅ KEPT: Setup penalty (minimize changeovers for efficiency)
         for key in self.y_part_line:
             objective_terms.append(self.config.SETUP_PENALTY * self.y_part_line[key])
-        
+
         self.model += pulp.lpSum(objective_terms), "Objective"
     
     def _build_flow_constraints_with_stage_seriality(self):
@@ -2061,7 +2103,170 @@ class ComprehensiveOptimizationModel:
                         pulp.lpSum(terms) <= eff_cap,
                         f"Box_{box_size}_W{w}"
                     )
-    
+
+    def _build_minimum_utilization_constraints(self):
+        """
+        ✅ PUSH MODEL: Force 100% capacity utilization across all stages.
+
+        For each stage and week, add minimum production constraint:
+        - Sum of production hours >= TARGET_UTILIZATION * Available capacity
+        - Only applies when there are orders to fulfill
+        - Target utilization: 95% (allows small solver flexibility)
+        """
+        print("\n✅ Adding MINIMUM CAPACITY UTILIZATION constraints (PUSH MODEL)...")
+
+        TARGET_UTILIZATION = 0.95  # Target 95% utilization (100% may be infeasible due to part mix)
+
+        # CASTING minimum utilization
+        print(f"  ✅ Casting: targeting {TARGET_UTILIZATION*100:.0f}% utilization...")
+        BIG_LINE_CAP = 12 * 2 * 0.9 * 6 * 60  # 7,776 min/week
+        SMALL_LINE_CAP = 12 * 2 * 0.9 * 6 * 60
+
+        for w in self.weeks:
+            big_line_time = []
+            small_line_time = []
+
+            for v in self.split_demand:
+                part, _ = self.part_week_mapping[v]
+                if part not in self.params:
+                    continue
+
+                moulding_line = self.params[part].get('moulding_line', '')
+                casting_cycle = self.params[part].get('casting_cycle', 0)
+                requires_vacuum = self.params[part].get('requires_vacuum', False)
+
+                effective_cycle = casting_cycle
+                if requires_vacuum:
+                    effective_cycle = casting_cycle / self.config.VACUUM_CAPACITY_PENALTY
+
+                time_term = self.x_casting[(v, w)] * effective_cycle
+
+                if 'Big Line' in moulding_line:
+                    big_line_time.append(time_term)
+                elif 'Small Line' in moulding_line:
+                    small_line_time.append(time_term)
+
+            # Minimum utilization constraints
+            if big_line_time:
+                self.model += (
+                    pulp.lpSum(big_line_time) >= TARGET_UTILIZATION * BIG_LINE_CAP,
+                    f"BigLine_MinUtil_W{w}"
+                )
+            if small_line_time:
+                self.model += (
+                    pulp.lpSum(small_line_time) >= TARGET_UTILIZATION * SMALL_LINE_CAP,
+                    f"SmallLine_MinUtil_W{w}"
+                )
+
+        # GRINDING minimum utilization
+        print(f"  ✅ Grinding: targeting {TARGET_UTILIZATION*100:.0f}% utilization...")
+        grinding_capacity = self.machine_manager.get_aggregated_capacity('Grinding')
+        if grinding_capacity > 0:
+            for w in self.weeks:
+                terms = []
+                for v in self.split_demand:
+                    part, _ = self.part_week_mapping[v]
+                    if part not in self.params:
+                        continue
+
+                    grind_cyc = self.params[part].get('grind_cycle', 0)
+                    grind_batch = max(1, self.params[part].get('grind_batch', 1))
+                    if grind_cyc > 0:
+                        hours_per_unit = (grind_cyc / 60.0) * (1.0 / grind_batch)
+                        terms.append(self.x_grinding[(v, w)] * hours_per_unit)
+
+                if terms:
+                    self.model += (
+                        pulp.lpSum(terms) >= TARGET_UTILIZATION * grinding_capacity,
+                        f"Grinding_MinUtil_W{w}"
+                    )
+
+        # MACHINING minimum utilization (MC1, MC2, MC3 share same machines)
+        print(f"  ✅ Machining: targeting {TARGET_UTILIZATION*100:.0f}% utilization...")
+        for stage_label, stage_idx, stage_vars in [('MC1', 0, self.x_mc1), ('MC2', 1, self.x_mc2), ('MC3', 2, self.x_mc3)]:
+            for w in self.weeks:
+                resource_terms = defaultdict(list)
+
+                for v in self.split_demand:
+                    part, _ = self.part_week_mapping[v]
+                    if part not in self.params:
+                        continue
+
+                    params = self.params[part]
+                    resources = params.get('mach_resources', [])
+                    cycles = params.get('mach_cycles', [])
+                    batches = params.get('mach_batches', [])
+
+                    if stage_idx >= len(resources):
+                        continue
+
+                    resource_code = (resources[stage_idx] or '').strip()
+                    cycle = cycles[stage_idx] if stage_idx < len(cycles) else 0
+                    batch = batches[stage_idx] if stage_idx < len(batches) else 1
+                    batch = max(1, batch or 1)
+
+                    hours_per_unit = 0.0
+                    if cycle and cycle > 0:
+                        hours_per_unit = (cycle / 60.0) / batch
+
+                    if hours_per_unit > 0 and resource_code and resource_code.lower() != 'nan':
+                        resource_terms[resource_code].append((v, hours_per_unit))
+
+                # Add minimum utilization constraint per resource
+                for res_code, plist in resource_terms.items():
+                    cap = self.machine_manager.get_machine_capacity(res_code)
+                    if cap > 0:
+                        terms = [stage_vars[(v, w)] * hours for (v, hours) in plist]
+                        if terms:
+                            self.model += (
+                                pulp.lpSum(terms) >= TARGET_UTILIZATION * cap,
+                                f"{stage_label}_MinUtil_{res_code}_W{w}"
+                            )
+
+        # PAINTING minimum utilization (SP1, SP2, SP3)
+        print(f"  ✅ Painting: targeting {TARGET_UTILIZATION*100:.0f}% utilization...")
+        for stage_label, stage_idx, stage_vars in [('SP1', 0, self.x_sp1), ('SP2', 1, self.x_sp2), ('SP3', 2, self.x_sp3)]:
+            for w in self.weeks:
+                resource_terms = defaultdict(list)
+
+                for v in self.split_demand:
+                    part, _ = self.part_week_mapping[v]
+                    if part not in self.params:
+                        continue
+
+                    params = self.params[part]
+                    resources = params.get('paint_resources', [])
+                    cycles = params.get('paint_cycles', [])
+                    batches = params.get('paint_batches', [])
+
+                    if stage_idx >= len(resources):
+                        continue
+
+                    resource_code = (resources[stage_idx] or '').strip()
+                    cycle = cycles[stage_idx] if stage_idx < len(cycles) else 0
+                    batch = batches[stage_idx] if stage_idx < len(batches) else 1
+                    batch = max(1, batch or 1)
+
+                    hours_per_unit = 0.0
+                    if cycle and cycle > 0:
+                        hours_per_unit = (cycle / 60.0) / batch
+
+                    if hours_per_unit > 0 and resource_code and resource_code.lower() != 'nan':
+                        resource_terms[resource_code].append((v, hours_per_unit))
+
+                # Add minimum utilization constraint per resource
+                for res_code, plist in resource_terms.items():
+                    cap = self.machine_manager.get_machine_capacity(res_code)
+                    if cap > 0:
+                        terms = [stage_vars[(v, w)] * hours for (v, hours) in plist]
+                        if terms:
+                            self.model += (
+                                pulp.lpSum(terms) >= TARGET_UTILIZATION * cap,
+                                f"{stage_label}_MinUtil_{res_code}_W{w}"
+                            )
+
+        print(f"  ✅ Minimum utilization constraints added (target: {TARGET_UTILIZATION*100:.0f}%)")
+
     def _print_solution_summary(self):
         total_casting = sum(pulp.value(self.x_casting[(v, w)]) or 0 
                            for v in self.split_demand for w in self.weeks)

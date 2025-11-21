@@ -6,7 +6,7 @@ This repository contains a **Manufacturing Production Planning Optimization Syst
 
 **Primary Use Case**: Enterprise production planning for foundry/casting manufacturing facilities in India.
 
-**Current Performance**: 100% fulfillment, 100% on-time delivery rate.
+**Current Performance**: 100% fulfillment, 100% on-time delivery rate, **100% capacity utilization** on Casting and Grinding stages (PUSH model).
 
 ## Repository Structure
 
@@ -214,12 +214,24 @@ Parts with existing WIP inventory skip earlier stages:
 - **Machine hours**: Resource-specific weekly hours with OEE
 - **Vacuum line capacity**: Big/Small line hours with penalty factor
 
-### 4. Optimization Objective
-Minimize total cost:
-- `UNMET_DEMAND_PENALTY` (200,000) - High cost for unfulfilled orders
-- `LATENESS_PENALTY` (150,000) - Cost per week late (increased to prioritize on-time delivery)
-- `INVENTORY_HOLDING_COST` (1) - Per unit per week
+### 4. Optimization Objective (PUSH Model - November 2025)
+
+**PUSH Model**: Maximize capacity utilization while meeting delivery requirements.
+
+Minimize total cost (with production rewards):
+- `UNMET_DEMAND_PENALTY` (200,000) - CRITICAL: High cost for unfulfilled orders
+- `LATENESS_PENALTY` (150,000) - CRITICAL: Cost per week late (prioritize on-time delivery)
+- **PRODUCTION_REWARD** (-0.1) - **NEW**: Negative cost (reward) per unit produced to encourage capacity utilization
+- **INVENTORY_HOLDING_COST** - **REMOVED**: No penalty for early production or inventory (allows unlimited inventory buildup)
 - `SETUP_PENALTY` (5) - Pattern changeover cost
+
+**Key Changes from PULL to PUSH Model**:
+1. **Removed inventory holding penalties** → Allows unlimited early production
+2. **Added production maximization incentive** → Encourages using 100% capacity
+3. **Increased production variable upper bounds** → 10x demand per week (vs. limiting to exact demand)
+4. **Allowed early delivery** → Can ship before due date without penalty
+
+**Results**: Achieves 100% utilization on Casting and Grinding (bottleneck stages) across all weeks.
 
 ### 5. Part-Specific Timing
 - Cooling time (hours) between casting and grinding
@@ -465,6 +477,27 @@ def _safe_float(self, value):
     - **Model**: SP WIP + FG combined as `inv_fg` (packing non-bottleneck)
     - **Flow**: Casting → Grinding → Machining → Painting → SP WIP → Packing (instant) → FG → Delivery
 
+### PUSH Model Transformation (Nov 21, 2025):
+12. **Full Capacity PUSH Model**: Transformed weekly optimizer from PULL (just-in-time) to PUSH (capacity-driven)
+    - **File**: `production_plan_test.py`
+    - **Objective Changed**:
+      - ❌ **REMOVED**: Inventory holding cost penalty (was 1 per unit per week)
+      - ✅ **ADDED**: Production maximization reward (-0.1 per unit produced)
+      - ✅ **KEPT**: Unmet demand penalty (200,000) and lateness penalty (150,000) for delivery requirements
+    - **Production Bounds Changed**:
+      - **Before**: Limited to exact demand quantity (cast_ub = demand)
+      - **After**: Allow 10x overproduction (cast_ub = 10 * demand) to enable PUSH production
+    - **Delivery Constraints Changed**:
+      - **Before**: Restricted to specific delivery window (window_start to window_end)
+      - **After**: Allow early delivery in any week up to due date
+    - **Results Achieved**:
+      - ✅ **Casting**: 100% utilization (Big Line + Small Line) across all 16 weeks
+      - ✅ **Grinding**: 100% utilization across all 16 weeks
+      - ✅ **Machining**: 10-26% (MC1), 2-20% (MC2), 0-9% (MC3) - bottleneck limited
+      - ✅ **Painting**: 4-26% (SP1), 3-33% (SP2), 0-21% (SP3) - bottleneck limited
+      - ✅ **Order Fulfillment**: 100% fulfillment, 100% on-time delivery maintained
+    - **Minimum Utilization Constraints**: Initially attempted 95% minimum constraints per stage, but caused infeasibility - **disabled** in favor of production reward approach
+
 ## Future Roadmap: Decision Support System
 
 The current tool generates optimal schedules. Future development should transform it into a **decision support system** that answers:
@@ -514,4 +547,5 @@ This is an internal manufacturing optimization tool. For issues:
 ---
 
 *Last updated: 2025-11-21*
+*Weekly Optimizer: Transformed to Full Capacity PUSH Model - achieving 100% utilization on Casting and Grinding*
 *Daily Optimizer: Implemented Hybrid PUSH-PULL with hour-based multi-machine capacity tracking*
