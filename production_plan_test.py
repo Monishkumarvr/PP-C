@@ -1297,17 +1297,7 @@ class ComprehensiveOptimizationModel:
                 else:
                     self.x_sp3[(variant, w)] = 0  # Part skips SP3
 
-        # ✅ NEW: FG Inventory variables (span FULL planning horizon)
-        # FG inventory allows production in Weeks 1-5, hold, deliver when due
-        print("✓ Creating FG inventory variables for full planning horizon...")
-        self.x_fg_inventory = {}
-        for variant in self.split_demand:
-            for w in self.all_weeks:  # Full horizon (not just production weeks)
-                self.x_fg_inventory[(variant, w)] = pulp.LpVariable(
-                    f"fg_inv_{variant}_W{w}", lowBound=0, cat='Continuous'
-                )
-
-        # ✅ MODIFIED: Delivery variables span FULL planning horizon
+        # ✅ Delivery variables span FULL planning horizon (no separate FG inventory variables needed)
         # Production happens in Weeks 1-5, delivery respects customer windows across all weeks
         print("✓ Creating delivery variables for full planning horizon...")
         for variant in self.split_demand:
@@ -1506,8 +1496,9 @@ class ComprehensiveOptimizationModel:
                     )
                 cnt += 1
 
-        # ✅ NEW: FG inventory and delivery constraints (span FULL planning horizon)
-        # Separate loop because FG inventory and delivery span all weeks (not just production weeks)
+        # ✅ SIMPLIFIED: Direct delivery constraint (no separate FG inventory variables needed)
+        # Production happens in Weeks 1-5, delivery can happen anytime in Weeks 1-19
+        # Constraint: Total delivery up to week w <= WIP + Total production up to week w
         for part, variants in variants_by_part.items():
             part_params = self.params[part]
             wip = self.wip_init.get(part, {'FG':0,'SP':0,'MC':0,'GR':0,'CS':0})
@@ -1520,21 +1511,20 @@ class ComprehensiveOptimizationModel:
             else:
                 paint_source = self.x_sp1
 
-            for w in self.all_weeks:  # Full planning horizon (not just production weeks)
-                # FG inventory accumulation: Total FG ≤ Initial WIP + Total painting (from production weeks)
-                self.model += (
-                    pulp.lpSum(self.x_fg_inventory[(v, t)] for v in variants for t in self.all_weeks if t <= w)
-                    <= wip['FG'] + wip['SP'] +
-                       pulp.lpSum(paint_source[(v, t)] for v in variants for t in self.weeks if t <= w),
-                    f"Agg_Paint_FG_{part}_W{w}"
+            for w in self.all_weeks:  # Full planning horizon (delivery can happen anytime)
+                # Total delivery up to week w <= FG+SP WIP + Total production up to min(w, max_production_week)
+                production_up_to_w = pulp.lpSum(
+                    paint_source[(v, t)] for v in variants
+                    for t in self.weeks if t <= w  # Production limited to Weeks 1-5
                 )
-                cnt += 1
+                delivery_up_to_w = pulp.lpSum(
+                    self.x_delivery[(v, t)] for v in variants
+                    for t in self.all_weeks if t <= w  # Delivery across full horizon
+                )
 
-                # Delivery from FG: Total delivery ≤ Total FG inventory
                 self.model += (
-                    pulp.lpSum(self.x_delivery[(v, t)] for v in variants for t in self.all_weeks if t <= w)
-                    <= pulp.lpSum(self.x_fg_inventory[(v, t)] for v in variants for t in self.all_weeks if t <= w),
-                    f"Agg_FG_Deliv_{part}_W{w}"
+                    delivery_up_to_w <= wip['FG'] + wip['SP'] + production_up_to_w,
+                    f"Agg_Paint_Deliv_{part}_W{w}"
                 )
                 cnt += 1
 
@@ -1689,8 +1679,9 @@ class ComprehensiveOptimizationModel:
     def _build_demand_constraints(self):
         print("\n✓ Adding demand constraints...")
         for v in self.split_demand:
+            # ✅ CRITICAL FIX: Sum delivery over ALL weeks (not just production weeks)
             self.model += (
-                pulp.lpSum(self.x_delivery[(v, w)] for w in self.weeks) + self.unmet_demand[v] 
+                pulp.lpSum(self.x_delivery[(v, w)] for w in self.all_weeks) + self.unmet_demand[v]
                 == self.split_demand[v],
                 f"Demand_{v}"
             )
@@ -1710,10 +1701,12 @@ class ComprehensiveOptimizationModel:
             total_wip = (wip.get('FG',0) + wip.get('SP',0) +
                         wip.get('MC',0) + wip.get('GR',0) + wip.get('CS',0))
 
-            for w in self.weeks:
+            # ✅ CRITICAL FIX: Lead-time constraints over ALL delivery weeks
+            for w in self.all_weeks:
                 wL = max(0, w - L)
+                # Delivery up to week w requires casting by week (w - lead_time)
                 self.model += (
-                    pulp.lpSum(self.x_delivery[(v, t)] for t in self.weeks if t <= w)
+                    pulp.lpSum(self.x_delivery[(v, t)] for t in self.all_weeks if t <= w)
                     <= total_wip +
                        pulp.lpSum(self.x_casting[(v, t)] for t in self.weeks if 1 <= t <= wL),
                     f"LeadTime_{v}_W{w}"
