@@ -2707,7 +2707,7 @@ class FixedExecutiveReportGenerator:
         schedule_rows.append([
             'Week', 'Working Days', 'Holidays', 'Casting Tons', 'Grinding Units', 'MC1 Units',
             'MC2 Units', 'MC3 Units', 'SP1 Units', 'SP2 Units', 'SP3 Units',
-            'Big Line (hrs)', 'Small Line (hrs)', 'Big Line Util %', 'Small Line Util %'
+            'Big Line (hrs)', 'Small Line (hrs)'
         ])
 
         if 'Week' in daily.columns:
@@ -2722,9 +2722,7 @@ class FixedExecutiveReportGenerator:
                 'SP2_Units': 'sum',
                 'SP3_Units': 'sum',
                 'Big_Line_Hours': 'sum',
-                'Small_Line_Hours': 'sum',
-                'Big_Line_Util_%': 'mean',
-                'Small_Line_Util_%': 'mean'
+                'Small_Line_Hours': 'sum'
             }).reset_index()
 
             for _, wk_row in weekly_grouped.iterrows():
@@ -2745,9 +2743,7 @@ class FixedExecutiveReportGenerator:
                     f'{wk_row["SP2_Units"]:.0f}',
                     f'{wk_row["SP3_Units"]:.0f}',
                     f'{wk_row.get("Big_Line_Hours", 0):.1f}',
-                    f'{wk_row.get("Small_Line_Hours", 0):.1f}',
-                    f'{wk_row.get("Big_Line_Util_%", 0):.1f}%',
-                    f'{wk_row.get("Small_Line_Util_%", 0):.1f}%'
+                    f'{wk_row.get("Small_Line_Hours", 0):.1f}'
                 ])
         schedule_rows.append(['', '', '', '', '', '', '', '', '', '', '', '', ''])
         schedule_rows.append(['NOTES:', '', '', '', '', '', '', '', '', '', '', '', ''])
