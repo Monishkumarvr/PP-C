@@ -69,14 +69,19 @@ class ProductionConfig:
 
         # Delivery flexibility
         self.DELIVERY_BUFFER_WEEKS = 1  # Allow deliveries within ±1 week of due date without penalty
-        # Vacuum moulding line capacities
-        self.BIG_LINE_HOURS_PER_SHIFT = 12
-        self.SMALL_LINE_HOURS_PER_SHIFT = 12
-        self.SHIFTS_PER_DAY = 2
-        self.BIG_LINE_HOURS_PER_DAY = self.BIG_LINE_HOURS_PER_SHIFT * self.SHIFTS_PER_DAY * self.OEE
-        self.SMALL_LINE_HOURS_PER_DAY = self.SMALL_LINE_HOURS_PER_SHIFT * self.SHIFTS_PER_DAY * self.OEE
-        self.BIG_LINE_HOURS_PER_WEEK = self.BIG_LINE_HOURS_PER_DAY * self.WORKING_DAYS_PER_WEEK
-        self.SMALL_LINE_HOURS_PER_WEEK = self.SMALL_LINE_HOURS_PER_DAY * self.WORKING_DAYS_PER_WEEK
+
+        # ✅ FIX: Vacuum moulding line capacities
+        # Master Data "Available Hours per Day" is TOTAL hours per day across all shifts, NOT per shift
+        # Do NOT multiply by shifts - that was causing 2x capacity (showing 50% when actual is 75%)
+        self.BIG_LINE_HOURS_PER_DAY = 12  # Total hours per day from Machine Constraints
+        self.SMALL_LINE_HOURS_PER_DAY = 12  # Total hours per day from Machine Constraints
+        self.SHIFTS_PER_DAY = 2  # Number of shifts (informational only)
+
+        # Calculate weekly capacity: hours/day × OEE × working days
+        self.BIG_LINE_HOURS_PER_WEEK = self.BIG_LINE_HOURS_PER_DAY * self.OEE * self.WORKING_DAYS_PER_WEEK
+        self.SMALL_LINE_HOURS_PER_WEEK = self.SMALL_LINE_HOURS_PER_DAY * self.OEE * self.WORKING_DAYS_PER_WEEK
+
+        print(f"  Casting Capacity (fixed): {self.BIG_LINE_HOURS_PER_WEEK:.1f} hrs/week per line")
         
         # ✅ FIXED: Vacuum timing penalty
         self.VACUUM_CAPACITY_PENALTY = 0.75  # 25% capacity reduction for vacuum parts
