@@ -1187,7 +1187,7 @@ class ComprehensiveOptimizationModel:
         print("="*80)
 
         solver = PULP_CBC_CMD(
-            timeLimit=120,  # Increased from 120 to 300 seconds for better WIP utilization
+            timeLimit=600,  # 10 minutes - allow solver more time to find better solution
             threads=8,
             msg=1
         )
