@@ -1297,7 +1297,28 @@ class ComprehensiveOptimizationModel:
                 else:
                     self.x_sp3[(variant, w)] = 0  # Part skips SP3
 
-        # ✅ Delivery variables span FULL planning horizon (no separate FG inventory variables needed)
+        # ✅ FG INVENTORY variables - Track inventory between production (Weeks 1-5) and delivery (Weeks 1-19)
+        # Production happens in Weeks 1-5 (concentrated, high utilization)
+        # FG inventory accumulates and is used for delivery across full horizon
+        print("✓ Creating FG inventory variables for full planning horizon...")
+        self.fg_inventory = {}
+
+        # Group variants by part to track FG inventory at part level
+        variants_by_part = {}
+        for v in self.split_demand:
+            part, _ = self.part_week_mapping[v]
+            if part not in variants_by_part:
+                variants_by_part[part] = []
+            variants_by_part[part].append(v)
+
+        # FG inventory for each part across full horizon
+        for part in variants_by_part:
+            for w in self.all_weeks:  # Track inventory from Week 1 to end
+                self.fg_inventory[(part, w)] = pulp.LpVariable(
+                    f"fg_inv_{part}_W{w}", lowBound=0, cat='Continuous'
+                )
+
+        # ✅ Delivery variables span FULL planning horizon (delivery from FG inventory)
         # Production happens in Weeks 1-5, delivery respects customer windows across all weeks
         print("✓ Creating delivery variables for full planning horizon...")
         for variant in self.split_demand:
@@ -1368,12 +1389,12 @@ class ComprehensiveOptimizationModel:
         total_vars = (len(self.x_casting) + len(self.x_grinding) +
                       len(self.x_mc1) + len(self.x_mc2) + len(self.x_mc3) +
                       len(self.x_sp1) + len(self.x_sp2) + len(self.x_sp3) +
-                      len(self.x_delivery) + len(self.unmet_demand) +
+                      len(self.fg_inventory) + len(self.x_delivery) + len(self.unmet_demand) +
                       len(self.y_part_line) +
                       len(self.wip_consumed_cs) + len(self.wip_consumed_gr) +
                       len(self.wip_consumed_mc) + len(self.wip_consumed_sp))
         wip_vars = len(self.wip_consumed_cs) + len(self.wip_consumed_gr) + len(self.wip_consumed_mc) + len(self.wip_consumed_sp)
-        print(f"  ✓ Created {total_vars:,} variables (including {len(self.y_part_line)} binary setup, {wip_vars} WIP consumption)")
+        print(f"  ✓ Created {total_vars:,} variables (including {len(self.fg_inventory)} FG inventory, {len(self.y_part_line)} binary setup, {wip_vars} WIP consumption)")
     
     def _build_objective(self):
         """Objective with startup bonus and setup penalty."""
@@ -1386,17 +1407,23 @@ class ComprehensiveOptimizationModel:
         # Lateness penalty - based on actual due date, not window_end
         for v in self.split_demand:
             _, due = self.part_week_mapping[v]
-            for w in self.weeks:
+            for w in self.all_weeks:  # Check across full delivery horizon
                 weeks_late = max(0, w - due)
                 if weeks_late > 0:
                     objective_terms.append(
                         self.config.LATENESS_PENALTY * weeks_late * self.x_delivery[(v, w)]
                     )
         
-        # Inventory holding cost (small cost for early delivery - allows early production + storage)
+        # FG Inventory holding cost (incentivize Just-In-Time delivery, minimize warehouse stock)
+        for part_week in self.fg_inventory:
+            objective_terms.append(
+                self.config.INVENTORY_HOLDING_COST * self.fg_inventory[part_week]
+            )
+
+        # Inventory holding cost for early delivery (small cost - allows early production + storage)
         for v in self.split_demand:
             _, due = self.part_week_mapping[v]
-            for w in self.weeks:
+            for w in self.all_weeks:  # Check across full horizon
                 weeks_early = max(0, due - w)
                 # Only penalize if delivering VERY early (beyond MAX_EARLY_WEEKS)
                 if weeks_early > self.config.MAX_EARLY_WEEKS:
@@ -1406,7 +1433,7 @@ class ComprehensiveOptimizationModel:
                     )
 
         # ✅ ENHANCED: Startup practice bonus removed to avoid incentivizing overproduction
-        
+
         # ✅ FIXED: Setup penalty (minimize changeovers)
         for key in self.y_part_line:
             objective_terms.append(self.config.SETUP_PENALTY * self.y_part_line[key])
@@ -1496,9 +1523,11 @@ class ComprehensiveOptimizationModel:
                     )
                 cnt += 1
 
-        # ✅ SIMPLIFIED: Direct delivery constraint (no separate FG inventory variables needed)
-        # Production happens in Weeks 1-5, delivery can happen anytime in Weeks 1-19
-        # Constraint: Total delivery up to week w <= WIP + Total production up to week w
+        # ✅ FG INVENTORY FLOW CONSTRAINTS (RESTORED per user request)
+        # Production (Weeks 1-5) -> FG Inventory -> Delivery (Weeks 1-19)
+        # FG_inv[w] = FG_inv[w-1] + Production[w] - Delivery[w]
+        # Initial FG inventory from WIP (FG + SP stages)
+        print("\n✅ Adding FG inventory flow constraints...")
         for part, variants in variants_by_part.items():
             part_params = self.params[part]
             wip = self.wip_init.get(part, {'FG':0,'SP':0,'MC':0,'GR':0,'CS':0})
@@ -1511,22 +1540,31 @@ class ComprehensiveOptimizationModel:
             else:
                 paint_source = self.x_sp1
 
-            for w in self.all_weeks:  # Full planning horizon (delivery can happen anytime)
-                # Total delivery up to week w <= FG+SP WIP + Total production up to min(w, max_production_week)
-                production_up_to_w = pulp.lpSum(
-                    paint_source[(v, t)] for v in variants
-                    for t in self.weeks if t <= w  # Production limited to Weeks 1-5
-                )
-                delivery_up_to_w = pulp.lpSum(
-                    self.x_delivery[(v, t)] for v in variants
-                    for t in self.all_weeks if t <= w  # Delivery across full horizon
+            for w in self.all_weeks:
+                # Production in this week (only Weeks 1-5 have production)
+                production_this_week = pulp.lpSum(
+                    paint_source[(v, w)] for v in variants if w in self.weeks
                 )
 
-                self.model += (
-                    delivery_up_to_w <= wip['FG'] + wip['SP'] + production_up_to_w,
-                    f"Agg_Paint_Deliv_{part}_W{w}"
+                # Delivery in this week (all variants)
+                delivery_this_week = pulp.lpSum(
+                    self.x_delivery[(v, w)] for v in variants
                 )
+
+                if w == 1:
+                    # Week 1: FG inventory = Initial WIP (FG + SP) + Production - Delivery
+                    self.model += (
+                        self.fg_inventory[(part, w)] == wip['FG'] + wip['SP'] + production_this_week - delivery_this_week,
+                        f"FG_Flow_{part}_W{w}"
+                    )
+                else:
+                    # Week w: FG inventory = Previous week inventory + Production - Delivery
+                    self.model += (
+                        self.fg_inventory[(part, w)] == self.fg_inventory[(part, w-1)] + production_this_week - delivery_this_week,
+                        f"FG_Flow_{part}_W{w}"
+                    )
                 cnt += 1
+        print(f"  ✓ Added {cnt} FG inventory flow constraints")
 
         # Now add VARIANT-LEVEL constraints for internal stage seriality (MC2≤MC1, SP2≤SP1, etc.)
         for v in self.split_demand:
