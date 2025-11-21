@@ -2232,51 +2232,51 @@ class ComprehensiveResultsAnalyzer:
                 units = row.get('Units', 0)
                 params = self.params.get(part, {})
 
-                # Get cycle time based on stage
+                # Get cycle time based on stage (FIX: Use correct parameter keys)
                 if stage_name == 'grinding':
-                    cycle_time = params.get('grinding_cycle', 0)
+                    cycle_time = params.get('grind_cycle', 0)  # FIX: grind_cycle not grinding_cycle
                 elif stage_name == 'mc1':
-                    cycle_time = params.get('mc1_cycle', 0)
+                    mach_cycles = params.get('mach_cycles', [0, 0, 0])
+                    cycle_time = mach_cycles[0]  # FIX: Use array index
                 elif stage_name == 'mc2':
-                    cycle_time = params.get('mc2_cycle', 0)
+                    mach_cycles = params.get('mach_cycles', [0, 0, 0])
+                    cycle_time = mach_cycles[1]  # FIX: Use array index
                 elif stage_name == 'mc3':
-                    cycle_time = params.get('mc3_cycle', 0)
+                    mach_cycles = params.get('mach_cycles', [0, 0, 0])
+                    cycle_time = mach_cycles[2]  # FIX: Use array index
                 elif stage_name == 'sp1':
-                    cycle_time = params.get('sp1_cycle', 0)
+                    paint_cycles = params.get('paint_cycles', [0, 0, 0])
+                    cycle_time = paint_cycles[0]  # FIX: Use array index
                 elif stage_name == 'sp2':
-                    cycle_time = params.get('sp2_cycle', 0)
+                    paint_cycles = params.get('paint_cycles', [0, 0, 0])
+                    cycle_time = paint_cycles[1]  # FIX: Use array index
                 elif stage_name == 'sp3':
-                    cycle_time = params.get('sp3_cycle', 0)
+                    paint_cycles = params.get('paint_cycles', [0, 0, 0])
+                    cycle_time = paint_cycles[2]  # FIX: Use array index
                 else:
                     cycle_time = 0
 
                 total_minutes += units * cycle_time
 
-            # Get capacity from machine manager
-            if stage_name == 'grinding':
-                resource_code = 'GR'  # Grinding resource code
-            elif stage_name == 'mc1':
-                resource_code = 'MC1'
-            elif stage_name == 'mc2':
-                resource_code = 'MC2'
-            elif stage_name == 'mc3':
-                resource_code = 'MC3'
-            elif stage_name == 'sp1':
-                resource_code = 'SP1'
-            elif stage_name == 'sp2':
-                resource_code = 'SP2'
-            elif stage_name == 'sp3':
-                resource_code = 'SP3'
-            else:
-                resource_code = None
-
-            # Get total weekly capacity for this resource
+            # Get capacity from machine manager by operation name
             capacity_hours = 0
-            if resource_code:
-                # Sum capacity across all machines with this operation
+            if stage_name == 'grinding':
+                # Sum all grinding machines
                 for machine_code, machine_data in self.machine_manager.machines.items():
-                    operation = machine_data.get('operation', '')
-                    if resource_code in operation or resource_code in machine_code:
+                    operation = machine_data.get('operation', '').lower()
+                    if 'grinding' in operation or 'grind' in operation:
+                        capacity_hours += machine_data.get('weekly_hours', 0)
+            elif stage_name in ('mc1', 'mc2', 'mc3'):
+                # All machining stages share the same capacity pool
+                for machine_code, machine_data in self.machine_manager.machines.items():
+                    operation = machine_data.get('operation', '').lower()
+                    if 'machining' in operation or 'mach' in operation:
+                        capacity_hours += machine_data.get('weekly_hours', 0)
+            elif stage_name in ('sp1', 'sp2', 'sp3'):
+                # All painting stages share the same capacity pool
+                for machine_code, machine_data in self.machine_manager.machines.items():
+                    operation = machine_data.get('operation', '').lower()
+                    if 'painting' in operation or 'paint' in operation:
                         capacity_hours += machine_data.get('weekly_hours', 0)
 
             capacity_minutes = capacity_hours * 60
