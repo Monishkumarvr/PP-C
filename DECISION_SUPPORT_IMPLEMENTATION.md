@@ -14,6 +14,29 @@
 
 ---
 
+## 0. Implementation Status
+
+### ✅ Implemented Features
+
+| Feature | Status | File | Notes |
+|---------|--------|------|-------|
+| **Daily Production & Inventory Tracker** | ✅ Completed | `production_plan_executive_test7sheets.py` | Matrix format sheets (9 & 10) |
+| **Hour-Based Capacity Utilization** | ✅ Completed | `production_plan_daily.py`, `production_plan_daily_executive.py` | Multi-machine aware |
+| **Hybrid PUSH-PULL Model** | ⚠️ Partial | `production_plan_daily.py` | Works but needs graduated costs |
+
+### 📋 Planned Features (Not Yet Implemented)
+
+| Feature | Priority | Target Phase |
+|---------|----------|--------------|
+| **Graduated WIP Holding Costs** | High | Phase 4b |
+| **Bottleneck Analysis Module** | High | Phase 1 |
+| **ATP Calculator** | Medium | Phase 2 |
+| **Order Risk Dashboard** | Medium | Phase 3 |
+| **Recommendations Engine** | Medium | Phase 4 |
+| **Scenario Analyzer** | Low | Phase 5 |
+
+---
+
 ## 1. Architecture Overview
 
 ### Current vs Proposed Architecture
@@ -1276,6 +1299,108 @@ class RecommendationsEngine:
 
 ---
 
+## 5.5. Phase 4b: Graduated WIP Holding Costs (Hybrid PUSH-PULL Enhancement)
+
+### 5.5.1 Status: **PLANNED - NOT YET IMPLEMENTED**
+
+### 5.5.2 Problem Statement
+
+The current Hybrid PUSH-PULL daily optimizer uses uniform WIP holding cost across all stages:
+```python
+WIP_INVENTORY_COST_PER_DAY = 0.05  # Same for all stages
+```
+
+This creates no economic pressure to **flow inventory through stages**. Result: Parts sit at early stages (CS, GR) even when downstream capacity is available.
+
+### 5.5.3 Proposed Solution: Graduated WIP Costs
+
+Create "flow pressure" by making early-stage inventory more expensive to hold:
+
+```python
+# In ProductionConfig (production_plan_daily.py)
+CS_WIP_COST_PER_DAY = 2.0    # High cost - forces grinding
+GR_WIP_COST_PER_DAY = 1.0    # Medium cost - forces machining
+MC_WIP_COST_PER_DAY = 0.5    # Low cost - forces painting
+SP_WIP_COST_PER_DAY = 0.1    # Minimal - already painted
+FG_WIP_COST_PER_DAY = 0.05   # Lowest - ready to deliver
+```
+
+### 5.5.4 Implementation Changes
+
+**File: `production_plan_daily.py`**
+
+1. Add graduated cost parameters to `ProductionConfig.__init__()`:
+```python
+# Graduated WIP holding costs (daily)
+self.CS_WIP_COST = 2.0   # High - raw castings expensive to store
+self.GR_WIP_COST = 1.0   # Medium - ground parts
+self.MC_WIP_COST = 0.5   # Low - machined parts
+self.SP_WIP_COST = 0.1   # Minimal - painted, unpacked
+self.FG_WIP_COST = 0.05  # Lowest - ready to ship
+```
+
+2. Update objective function (around line 395):
+```python
+# Hybrid PUSH-PULL: Graduated WIP inventory costs
+parts = set(part for part, _ in self.part_day_mapping.values())
+for part in parts:
+    for d in self.working_days:
+        objective_terms.append(
+            self.config.CS_WIP_COST * self.inv_cs[(part, d)] +
+            self.config.GR_WIP_COST * self.inv_gr[(part, d)] +
+            self.config.MC_WIP_COST * self.inv_mc[(part, d)] +
+            self.config.SP_WIP_COST * self.inv_fg[(part, d)]  # SP+FG combined
+        )
+```
+
+### 5.5.5 Expected Behavior
+
+**Before (Uniform Cost)**:
+- Oct 1: CS WIP = 910 units sits idle
+- Grinding: Only processes when needed for specific orders
+- Result: Casting = 0%, Grinding = sporadic
+
+**After (Graduated Cost)**:
+- Solver penalized for holding CS inventory → grinds proactively
+- Grind output builds GR inventory → machines proactively
+- MC output builds MC inventory → paints proactively
+- Result: Smoother flow, higher capacity utilization
+
+**Example Cost Comparison** (for 100 units sitting at CS for 10 days):
+- Current: 100 × 10 × 0.05 = ₹50
+- Graduated: 100 × 10 × 2.0 = ₹2,000 → Solver forced to grind!
+
+### 5.5.6 Tuning Guidelines
+
+Cost ratios create flow velocity. If grinding utilization is too low:
+1. **Increase CS_WIP_COST** (make raw castings more expensive)
+2. **Decrease GR_WIP_COST** (make ground parts cheaper to hold)
+
+If parts flow too quickly (premature processing):
+1. **Decrease all WIP costs** proportionally
+2. **Increase gap between FG and order due dates** (MAX_EARLY_DAYS)
+
+Recommended starting ratios: **40:20:10:2:1** (CS:GR:MC:SP:FG)
+
+### 5.5.7 Integration Checklist
+
+- [ ] Add graduated cost parameters to `ProductionConfig`
+- [ ] Update objective function to use stage-specific costs
+- [ ] Test with current sales orders (2,239 units, Nov-Dec delivery)
+- [ ] Verify casting occurs throughout Oct-Nov (not just spikes)
+- [ ] Verify grinding/machining/painting utilization increases
+- [ ] Compare vs baseline: casting %, grinding %, WIP flow rate
+- [ ] Document optimal cost ratios for this facility
+
+### 5.5.8 Related to WIP Stage Clarification
+
+**Important**: SP WIP in this system means **painted but unpacked** parts (not intermediate painting):
+- **Casting → Grinding → Machining → Painting → SP WIP → Packing (instantaneous) → FG → Delivery**
+- SP WIP + FG both deliverable (packing assumed instant/non-bottleneck)
+- Combined as `inv_fg` in current model
+
+---
+
 ## 6. Phase 5: What-If Scenario Analyzer
 
 ### 6.1 Purpose
@@ -2064,4 +2189,5 @@ async def get_dashboard_summary():
 
 ---
 
-*Last updated: 2025-11-18*
+*Last updated: 2025-11-21*
+*Added: Graduated WIP Holding Costs (§5.5) - Implementation planned for Hybrid PUSH-PULL enhancement*

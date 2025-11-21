@@ -12,14 +12,18 @@ This repository contains a **Manufacturing Production Planning Optimization Syst
 
 ```
 PP-C/
-├── production_plan_test.py                    # Core optimization engine (~3,100 lines)
-├── production_plan_executive_test7sheets.py   # Executive reporting module (~3,600 lines)
-├── Master_Data_Updated_Nov_Dec.xlsx           # Input: Part master, sales orders, constraints
-├── Master_Data_Optimised_Updated__2_.xlsx     # Input: Alternative/updated master data
-├── production_plan_COMPREHENSIVE_test.xlsx    # Output: Detailed optimization results
-├── production_plan_EXECUTIVE_test.xlsx        # Output: Executive dashboard reports (10 sheets)
-├── DECISION_SUPPORT_IMPLEMENTATION.md         # Future decision support system design
-└── CLAUDE.md                                  # This file
+├── production_plan_test.py                      # Weekly optimization engine (~3,100 lines)
+├── production_plan_executive_test7sheets.py     # Weekly executive reports (~3,600 lines)
+├── production_plan_daily.py                     # Daily optimization engine (NEW)
+├── production_plan_daily_executive.py           # Daily executive reports (NEW)
+├── Master_Data_Updated_Nov_Dec.xlsx             # Input: Part master, sales orders, constraints
+├── Master_Data_Optimised_Updated__2_.xlsx       # Input: Alternative/updated master data
+├── production_plan_COMPREHENSIVE_test.xlsx      # Output: Weekly detailed results
+├── production_plan_EXECUTIVE_test.xlsx          # Output: Weekly executive reports (10 sheets)
+├── production_plan_daily_comprehensive.xlsx     # Output: Daily detailed results (NEW)
+├── production_plan_daily_EXECUTIVE.xlsx         # Output: Daily executive reports (NEW)
+├── DECISION_SUPPORT_IMPLEMENTATION.md           # Future decision support system design
+└── CLAUDE.md                                    # This file
 ```
 
 ## Core Modules
@@ -72,6 +76,65 @@ PP-C/
 8. Part-Level Daily Schedule - Detailed machine assignments
 9. **Daily Production** - Matrix format (Date × Part-Stage columns)
 10. **Daily Inventory** - Matrix format (Date × Part-WIP columns)
+
+### 3. `production_plan_daily.py` - Daily Optimization Engine (NEW)
+
+**Purpose**: Day-level linear programming optimization with Hybrid PUSH-PULL inventory management.
+
+**Key Features**:
+- **Daily granularity**: Optimizes production by calendar day (not week)
+- **Hybrid PUSH-PULL**: Combines order-driven (PULL) with capacity-driven (PUSH) production
+  - PULL: Produces to fulfill specific orders
+  - PUSH: Uses idle capacity to process WIP through stages (speculative processing)
+- **Inventory balance constraints**: Tracks daily WIP flow through CS → GR → MC → SP → FG stages
+- **Stage seriality**: Enforces MC1→MC2→MC3 and SP1→SP2→SP3 sequencing
+- **Hour-based capacity**: Uses cycle times to calculate machine hours (not just units/tons)
+
+**Key Differences from Weekly Optimizer**:
+- Working day calendar awareness (skips Sundays, holidays)
+- Daily demand variants (orders split by delivery date)
+- Inventory tracking variables for each stage
+- Multi-machine capacity calculation
+
+**Configuration Parameters** (different from weekly):
+```python
+LATENESS_PENALTY_PER_DAY = 20000      # Daily penalty (vs 150k/week)
+INVENTORY_HOLDING_COST_PER_DAY = 0.14 # Daily holding cost
+MAX_EARLY_DAYS = 56                    # 8 weeks buffer before inventory penalty
+WIP_INVENTORY_COST_PER_DAY = 0.05      # Cost to hold WIP at intermediate stages
+```
+
+**Inventory Variables**:
+- `inv_cs[(part, day)]` - Casting WIP inventory
+- `inv_gr[(part, day)]` - Grinding WIP inventory
+- `inv_mc[(part, day)]` - Machining WIP inventory
+- `inv_fg[(part, day)]` - Finished goods (includes SP WIP + FG, packing assumed instant)
+
+### 4. `production_plan_daily_executive.py` - Daily Executive Reports (NEW)
+
+**Purpose**: Generate executive-level reports from daily optimization results with multi-machine capacity awareness.
+
+**Key Features**:
+- **Hour-based utilization**: Shows capacity % using actual cycle times
+- **Multi-machine capacity calculation**: Reads Machine Constraints to compute total available hours
+  - Formula: `Available_Hours = Num_Machines × Hours_Per_Shift × Shifts × OEE(0.9)`
+  - Casting: 43.2 hrs/day (2 vacuum lines)
+  - Grinding: 252 hrs/day (35 hand grinding machines)
+  - Machining: 475.2 hrs/day (shared across MC1/MC2/MC3)
+  - Painting: SP1/SP2 = 72 hrs/day each (2 primer booths), SP3 = 36 hrs/day (1 top coat booth)
+
+**Key Classes**:
+- `ProductionCalendar` - Working day calculations with Indian holidays
+- `MasterDataEnricher` - Enriches schedules with cycle times and machine assignments
+- `DailyExecutiveReportGenerator` - Generates 10-sheet Excel report
+
+**Capacity Calculation Method**:
+```python
+def _calculate_available_hours(self):
+    # Reads from Master_Data Machine Constraints sheet
+    # Maps resources to stages (Casting, Grinding, MC1-3, SP1-3)
+    # Returns dict: {'Casting': 43.2, 'Grinding': 252.0, ...}
+```
 
 ## Technology Stack
 
@@ -245,15 +308,18 @@ INVENTORY_HOLDING_COST = 1                 # Per unit per week
 ### Running the Optimization
 
 ```bash
-# Run comprehensive optimization
+# Weekly Optimizer (legacy - week-level granularity)
 python production_plan_test.py
-
-# Generate executive reports (after running optimization)
 python production_plan_executive_test7sheets.py
+
+# Daily Optimizer (NEW - day-level granularity with Hybrid PUSH-PULL)
+python production_plan_daily.py
+python production_plan_daily_executive.py
 ```
 
 ### Typical Workflow
 
+#### Weekly Optimizer:
 1. Update `Master_Data_*.xlsx` with current:
    - Part Master specifications
    - Sales Orders with delivery dates
@@ -265,6 +331,17 @@ python production_plan_executive_test7sheets.py
 
 3. Run `production_plan_executive_test7sheets.py` for reports
    - Creates `production_plan_EXECUTIVE_test.xlsx`
+
+#### Daily Optimizer (Recommended for better granularity):
+1. Update same `Master_Data_*.xlsx` file (shared input)
+
+2. Run `production_plan_daily.py` to generate daily schedule
+   - Creates `production_plan_daily_comprehensive.xlsx`
+   - Solver time: ~8-10 minutes for 105 days, 245 orders
+
+3. Run `production_plan_daily_executive.py` for reports
+   - Creates `production_plan_daily_EXECUTIVE.xlsx`
+   - Includes hour-based utilization with multi-machine capacity
 
 ## Code Conventions
 
@@ -340,8 +417,9 @@ def _safe_float(self, value):
 4. **Single-solver**: Uses CBC solver only (no solver selection)
 5. **In-memory processing**: Large datasets may cause memory issues
 
-## Recent Fixes (Nov 2025)
+## Recent Updates (Nov 2025)
 
+### Weekly Optimizer Fixes:
 1. **WIP-covered orders**: Orders fully covered by WIP now create variants for delivery tracking
 2. **Stage skip calculation**: Fixed cascade reduction (WIP properly reduces upstream requirements)
 3. **Part_Fulfillment reporting**: Now includes FG+SP WIP in delivered count
@@ -353,6 +431,39 @@ def _safe_float(self, value):
    - `10_DAILY_INVENTORY`: Date rows × Part-WIP columns (FG, SP, MC, GR, CS)
    - Two-row headers with part names spanning stage columns
    - Frozen panes for easy navigation
+
+### Daily Optimizer Implementation (NEW):
+8. **Hybrid PUSH-PULL System**: Implemented inventory balance constraints for speculative WIP processing
+   - **File**: `production_plan_daily.py`
+   - **Features**:
+     - Inventory variables by part and day: `inv_cs`, `inv_gr`, `inv_mc`, `inv_fg`
+     - Stage seriality constraints: MC1→MC2→MC3, SP1→SP2→SP3
+     - Inventory balance: `inv[d] = inv[d-1] + production - consumption`
+     - WIP inventory holding cost (uniform 0.05/day - **needs graduated costs**)
+   - **Status**: ⚠️ Works but underutilizes capacity (casting often 0%)
+   - **Next**: Implement graduated WIP costs (see DECISION_SUPPORT_IMPLEMENTATION.md §5.5)
+
+9. **Cycle Time Key Fixes**: Corrected parameter key names for hour calculation
+   - `grinding_cycle` → `grind_cycle`
+   - `mc1_cycle/mc2_cycle/mc3_cycle` → `mach_cycles[0/1/2]`
+   - `sp1_cycle/sp2_cycle/sp3_cycle` → `paint_cycles[0/1/2]`
+   - Applied to both optimization constraints and reporting
+
+10. **Multi-Machine Capacity Calculation**: Hour-based utilization with realistic capacity limits
+    - **File**: `production_plan_daily_executive.py`
+    - **Method**: `_calculate_available_hours()` reads Machine Constraints sheet
+    - **Results**:
+      - Casting: 3.7% avg, 27.8% peak (43.2 hrs/day available)
+      - Grinding: 15.4% avg, 100% peak (252 hrs/day available) ← **Bottleneck identified**
+      - MC1: 2.1% avg, 43.9% peak (475.2 hrs/day available)
+      - SP1: 4.1% avg, 78.7% peak (72 hrs/day available)
+    - All utilizations now realistic (≤100% except bottlenecks)
+
+11. **SP WIP vs FG Clarification**: Packing treated as instantaneous
+    - **SP WIP** = Painted but unpacked parts (ready to pack)
+    - **FG** = Packed parts (ready to ship)
+    - **Model**: SP WIP + FG combined as `inv_fg` (packing non-bottleneck)
+    - **Flow**: Casting → Grinding → Machining → Painting → SP WIP → Packing (instant) → FG → Delivery
 
 ## Future Roadmap: Decision Support System
 
@@ -402,4 +513,5 @@ This is an internal manufacturing optimization tool. For issues:
 
 ---
 
-*Last updated: 2025-11-19*
+*Last updated: 2025-11-21*
+*Daily Optimizer: Implemented Hybrid PUSH-PULL with hour-based multi-machine capacity tracking*
