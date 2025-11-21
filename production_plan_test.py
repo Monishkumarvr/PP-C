@@ -1760,13 +1760,20 @@ class ComprehensiveOptimizationModel:
                 casting_cycle = self.params[part].get('casting_cycle', 0)
                 unit_weight = self.params[part].get('unit_weight', 0)
                 requires_vacuum = self.params[part].get('requires_vacuum', False)
+                box_quantity = self.params[part].get('box_quantity', 1)  # Units per mould
+
+                # ✅ CRITICAL FIX: Box quantity represents cavity count (units per mould)
+                # Casting time = (units / box_qty) × cycle_time_per_mould
+                # Example: 100 units, Box Qty = 4 → 25 moulds needed
+                moulds_per_unit = 1.0 / max(1.0, float(box_quantity))
 
                 # ✅ Apply vacuum penalty to effective time
                 effective_cycle = casting_cycle
                 if requires_vacuum:
                     effective_cycle = casting_cycle / VACUUM_PENALTY
 
-                time_term = self.x_casting[(v, w)] * effective_cycle
+                # Time = moulds × cycle_time = (units / box_qty) × cycle_time
+                time_term = self.x_casting[(v, w)] * moulds_per_unit * effective_cycle
 
                 if unit_weight > 0:
                     ton_term = self.x_casting[(v, w)] * (unit_weight / 1000.0)
@@ -2353,19 +2360,26 @@ class ComprehensiveResultsAnalyzer:
                 casting_cycle = self.params[part].get('casting_cycle', 0)
                 moulding_line = self.params[part].get('moulding_line', '')
                 requires_vacuum = self.params[part].get('requires_vacuum', False)
-                
+                box_quantity = self.params[part].get('box_quantity', 1)  # Units per mould
+
+                # ✅ CRITICAL FIX: Account for box quantity (cavity count)
+                moulds_per_unit = 1.0 / max(1.0, float(box_quantity))
+
                 effective_cycle = casting_cycle
                 if requires_vacuum:
                     effective_cycle = casting_cycle / VACUUM_PENALTY
 
+                # Time = moulds × cycle_time = (units / box_qty) × cycle_time
+                time_minutes = qty * moulds_per_unit * effective_cycle
+
                 if 'Big Line' in moulding_line:
-                    big_line_minutes += qty * effective_cycle
+                    big_line_minutes += time_minutes
                     if requires_vacuum:
-                        big_vacuum_minutes += qty * effective_cycle
+                        big_vacuum_minutes += time_minutes
                 elif 'Small Line' in moulding_line:
-                    small_line_minutes += qty * effective_cycle
+                    small_line_minutes += time_minutes
                     if requires_vacuum:
-                        small_vacuum_minutes += qty * effective_cycle
+                        small_vacuum_minutes += time_minutes
 
             big_util = (big_line_minutes / BIG_LINE_CAP_MIN) * 100
             small_util = (small_line_minutes / SMALL_LINE_CAP_MIN) * 100
