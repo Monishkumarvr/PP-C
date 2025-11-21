@@ -1446,9 +1446,10 @@ class ComprehensiveOptimizationModel:
         # PUSH model allows unlimited early production and inventory accumulation
 
         # ✅ NEW: Production maximization incentive (negative cost = reward for production)
-        # Small reward to encourage using available capacity without overwhelming delivery requirements
+        # Strong reward to encourage using available capacity without overwhelming delivery requirements
         # Must be much smaller than penalties (200,000 unmet demand, 150,000 lateness)
-        PRODUCTION_REWARD = 0.1  # Small reward per unit - gentle push towards higher utilization
+        # But large enough to incentivize using idle capacity
+        PRODUCTION_REWARD = 50  # Moderate reward per unit - strong push towards 100% utilization
         for variant in self.split_demand:
             for w in self.weeks:
                 # Reward production at each stage to encourage capacity utilization
