@@ -1285,26 +1285,33 @@ class ComprehensiveOptimizationModel:
                     )
                 else:
                     self.x_sp3[(variant, w)] = 0  # Part skips SP3
-                
-                # SELECTIVE WINDOW RELAXATION: Relax windows ONLY for WIP-covered variants
-                # Logic: WIP should flow freely through available capacity
-                #        New production maintains tight windows to maximize casting utilization
-                part, due_week = self.part_week_mapping[variant]
-                has_wip = False
-                if part in self.stage_start_qty:
-                    casting_req = self.stage_start_qty[part].get('casting', 0)
-                    net_req = self.stage_start_qty[part].get('net', 0)
-                    # If casting < net, then WIP exists (CS, GR, MC, SP, or FG WIP)
-                    has_wip = (casting_req < net_req) if net_req > 0 else False
 
-                if has_wip and w <= window_end:
-                    # WIP-covered: Allow early delivery (process through free capacity)
-                    delivery_ub = demand_up
-                elif window_start <= w <= window_end:
-                    # New production: Tight windows (maintain front-loading)
+        # ✅ NEW: FG Inventory variables (decouples production from delivery)
+        # FG inventory allows WIP to process through available capacity early
+        # and hold as finished goods until delivery window
+        print("✓ Creating FG inventory variables...")
+        self.x_fg_inventory = {}
+        for variant in self.split_demand:
+            for w in self.weeks:
+                self.x_fg_inventory[(variant, w)] = pulp.LpVariable(
+                    f"fg_inv_{variant}_W{w}", lowBound=0, cat='Continuous'
+                )
+
+        # ✅ MODIFIED: Delivery variables with window constraints
+        # Production can happen early, but delivery respects customer windows
+        for variant in self.split_demand:
+            demand_up = float(self.split_demand[variant])
+            window_start, window_end = self.variant_windows.get(
+                variant, (1, self.config.PLANNING_WEEKS)
+            )
+
+            for w in self.weeks:
+                # Delivery window constraint (±1 week from due date)
+                if window_start <= w <= window_end:
                     delivery_ub = demand_up
                 else:
-                    delivery_ub = 0  # Outside window
+                    delivery_ub = 0  # Cannot deliver outside window
+
                 self.x_delivery[(variant, w)] = pulp.LpVariable(
                     f"deliver_{variant}_W{w}", lowBound=0, upBound=delivery_ub, cat='Continuous'
                 )
@@ -1488,7 +1495,11 @@ class ComprehensiveOptimizationModel:
                     )
                 cnt += 1
 
-                # ✅ AGGREGATE: Total delivery <= initial FG+SP WIP + total painting output
+                # ✅ NEW: FG inventory balance (decouples production from delivery)
+                # Flow: Painting → FG Inventory → Delivery
+                # FG_inv[w] = FG_inv[w-1] + painting[w] - delivery[w] + (FG+SP WIP for w=1)
+
+                # Determine painting source based on part routing
                 if part_params.get('has_sp3', True):
                     paint_source = self.x_sp3
                 elif part_params.get('has_sp2', True):
@@ -1496,11 +1507,20 @@ class ComprehensiveOptimizationModel:
                 else:
                     paint_source = self.x_sp1
 
+                # FG inventory accumulation: Total FG ≤ Initial WIP + Total painting
                 self.model += (
-                    pulp.lpSum(self.x_delivery[(v, t)] for v in variants for t in self.weeks if t <= w)
+                    pulp.lpSum(self.x_fg_inventory[(v, t)] for v in variants for t in self.weeks if t <= w)
                     <= wip['FG'] + wip['SP'] +
                        pulp.lpSum(paint_source[(v, t)] for v in variants for t in self.weeks if t <= w),
-                    f"Agg_Paint_Deliv_{part}_W{w}"
+                    f"Agg_Paint_FG_{part}_W{w}"
+                )
+                cnt += 1
+
+                # Delivery from FG: Total delivery ≤ Total FG inventory
+                self.model += (
+                    pulp.lpSum(self.x_delivery[(v, t)] for v in variants for t in self.weeks if t <= w)
+                    <= pulp.lpSum(self.x_fg_inventory[(v, t)] for v in variants for t in self.weeks if t <= w),
+                    f"Agg_FG_Deliv_{part}_W{w}"
                 )
                 cnt += 1
 
