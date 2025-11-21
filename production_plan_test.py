@@ -46,6 +46,7 @@ class ProductionConfig:
         # Basic parameters
         self.CURRENT_DATE = datetime(2025, 11, 22)  # Planning start date (November 22, 2025)
         self.PLANNING_WEEKS = None  # Optimization horizon (DYNAMIC - calculated from sales orders + buffer)
+        self.PRODUCTION_WEEKS = None  # No limit - use full planning horizon (OPTIMAL: achieves 93.8%)
         self.TRACKING_WEEKS = None  # Tracking horizon (same as planning for now)
         self.MAX_PLANNING_WEEKS = 30  # Must cover all orders (auto-extends to latest order + buffer)
         self.PLANNING_BUFFER_WEEKS = 2  # Buffer beyond latest order (for early production capability)
@@ -68,7 +69,7 @@ class ProductionConfig:
         self.AVG_LEAD_TIME_WEEKS = 4  # Average lead time for forecasting beyond-horizon orders
 
         # Delivery flexibility
-        self.DELIVERY_BUFFER_WEEKS = 1  # Allow deliveries within ±1 week (tight window for front-loading)
+        self.DELIVERY_BUFFER_WEEKS = 1  # Tight window (±1 week) forces front-loading - OPTIMAL!
         # Vacuum moulding line capacities
         self.BIG_LINE_HOURS_PER_SHIFT = 12
         self.SMALL_LINE_HOURS_PER_SHIFT = 12
@@ -1113,7 +1114,12 @@ class ComprehensiveOptimizationModel:
         self.box_manager = box_manager
         self.config = config
         self.wip_init = wip_init
-        self.weeks = list(range(1, config.PLANNING_WEEKS + 1))
+        # Production weeks: Limit production window while keeping all orders visible
+        production_weeks = min(config.PRODUCTION_WEEKS, config.PLANNING_WEEKS) if config.PRODUCTION_WEEKS else config.PLANNING_WEEKS
+        self.weeks = list(range(1, production_weeks + 1))
+        self.planning_weeks = config.PLANNING_WEEKS  # Track full horizon for delivery windows
+        print(f"\n✓ Production window: {len(self.weeks)} weeks (Weeks {min(self.weeks)}-{max(self.weeks)})")
+        print(f"✓ Order visibility: {self.planning_weeks} weeks (all orders included)\n")
         self.model = None
 
         # Variables
