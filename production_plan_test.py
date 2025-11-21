@@ -46,9 +46,9 @@ class ProductionConfig:
         # Basic parameters
         self.CURRENT_DATE = datetime(2025, 11, 22)  # Planning start date (November 22, 2025)
         self.PLANNING_WEEKS = None  # Optimization horizon (DYNAMIC - calculated from sales orders + buffer)
-        self.PRODUCTION_WEEKS = None  # No limit - use full planning horizon (OPTIMAL: achieves 93.8%)
+        self.PRODUCTION_WEEKS = 5  # ✅ Concentrate production in Weeks 1-5 → High utilization
         self.TRACKING_WEEKS = None  # Tracking horizon (same as planning for now)
-        self.MAX_PLANNING_WEEKS = 30  # Must cover all orders (auto-extends to latest order + buffer)
+        self.MAX_PLANNING_WEEKS = 100  # Must cover all orders (auto-extends to latest order + buffer)
         self.PLANNING_BUFFER_WEEKS = 2  # Buffer beyond latest order (for early production capability)
         self.OEE = 0.90
         self.WORKING_DAYS_PER_WEEK = 6
@@ -1114,12 +1114,23 @@ class ComprehensiveOptimizationModel:
         self.box_manager = box_manager
         self.config = config
         self.wip_init = wip_init
-        # Production weeks: Limit production window while keeping all orders visible
-        production_weeks = min(config.PRODUCTION_WEEKS, config.PLANNING_WEEKS) if config.PRODUCTION_WEEKS else config.PLANNING_WEEKS
-        self.weeks = list(range(1, production_weeks + 1))
-        self.planning_weeks = config.PLANNING_WEEKS  # Track full horizon for delivery windows
-        print(f"\n✓ Production window: {len(self.weeks)} weeks (Weeks {min(self.weeks)}-{max(self.weeks)})")
-        print(f"✓ Order visibility: {self.planning_weeks} weeks (all orders included)\n")
+
+        # ✅ CRITICAL: Separate production weeks from planning horizon
+        # Production weeks: Concentrate production early (e.g., Weeks 1-5)
+        # Planning weeks: Track all orders for delivery (full horizon)
+        if config.PRODUCTION_WEEKS:
+            self.production_weeks_count = config.PRODUCTION_WEEKS
+        else:
+            self.production_weeks_count = config.PLANNING_WEEKS
+
+        self.planning_weeks_count = config.PLANNING_WEEKS
+        self.weeks = list(range(1, self.production_weeks_count + 1))  # Production window
+        self.all_weeks = list(range(1, self.planning_weeks_count + 1))  # Full horizon (delivery)
+
+        print(f"\n✓ Production window: Weeks 1-{self.production_weeks_count} (concentrate production)")
+        print(f"✓ Planning horizon: Weeks 1-{self.planning_weeks_count} (all orders tracked)")
+        print(f"✓ Strategy: Produce early → Hold as FG inventory → Deliver on due date\n")
+
         self.model = None
 
         # Variables
@@ -1286,26 +1297,26 @@ class ComprehensiveOptimizationModel:
                 else:
                     self.x_sp3[(variant, w)] = 0  # Part skips SP3
 
-        # ✅ NEW: FG Inventory variables (decouples production from delivery)
-        # FG inventory allows WIP to process through available capacity early
-        # and hold as finished goods until delivery window
-        print("✓ Creating FG inventory variables...")
+        # ✅ NEW: FG Inventory variables (span FULL planning horizon)
+        # FG inventory allows production in Weeks 1-5, hold, deliver when due
+        print("✓ Creating FG inventory variables for full planning horizon...")
         self.x_fg_inventory = {}
         for variant in self.split_demand:
-            for w in self.weeks:
+            for w in self.all_weeks:  # Full horizon (not just production weeks)
                 self.x_fg_inventory[(variant, w)] = pulp.LpVariable(
                     f"fg_inv_{variant}_W{w}", lowBound=0, cat='Continuous'
                 )
 
-        # ✅ MODIFIED: Delivery variables with window constraints
-        # Production can happen early, but delivery respects customer windows
+        # ✅ MODIFIED: Delivery variables span FULL planning horizon
+        # Production happens in Weeks 1-5, delivery respects customer windows across all weeks
+        print("✓ Creating delivery variables for full planning horizon...")
         for variant in self.split_demand:
             demand_up = float(self.split_demand[variant])
             window_start, window_end = self.variant_windows.get(
-                variant, (1, self.config.PLANNING_WEEKS)
+                variant, (1, self.planning_weeks_count)
             )
 
-            for w in self.weeks:
+            for w in self.all_weeks:  # Full horizon (not just production weeks)
                 # Delivery window constraint (±1 week from due date)
                 if window_start <= w <= window_end:
                     delivery_ub = demand_up
@@ -1495,21 +1506,24 @@ class ComprehensiveOptimizationModel:
                     )
                 cnt += 1
 
-                # ✅ NEW: FG inventory balance (decouples production from delivery)
-                # Flow: Painting → FG Inventory → Delivery
-                # FG_inv[w] = FG_inv[w-1] + painting[w] - delivery[w] + (FG+SP WIP for w=1)
+        # ✅ NEW: FG inventory and delivery constraints (span FULL planning horizon)
+        # Separate loop because FG inventory and delivery span all weeks (not just production weeks)
+        for part, variants in variants_by_part.items():
+            part_params = self.params[part]
+            wip = self.wip_init.get(part, {'FG':0,'SP':0,'MC':0,'GR':0,'CS':0})
 
-                # Determine painting source based on part routing
-                if part_params.get('has_sp3', True):
-                    paint_source = self.x_sp3
-                elif part_params.get('has_sp2', True):
-                    paint_source = self.x_sp2
-                else:
-                    paint_source = self.x_sp1
+            # Determine painting source based on part routing
+            if part_params.get('has_sp3', True):
+                paint_source = self.x_sp3
+            elif part_params.get('has_sp2', True):
+                paint_source = self.x_sp2
+            else:
+                paint_source = self.x_sp1
 
-                # FG inventory accumulation: Total FG ≤ Initial WIP + Total painting
+            for w in self.all_weeks:  # Full planning horizon (not just production weeks)
+                # FG inventory accumulation: Total FG ≤ Initial WIP + Total painting (from production weeks)
                 self.model += (
-                    pulp.lpSum(self.x_fg_inventory[(v, t)] for v in variants for t in self.weeks if t <= w)
+                    pulp.lpSum(self.x_fg_inventory[(v, t)] for v in variants for t in self.all_weeks if t <= w)
                     <= wip['FG'] + wip['SP'] +
                        pulp.lpSum(paint_source[(v, t)] for v in variants for t in self.weeks if t <= w),
                     f"Agg_Paint_FG_{part}_W{w}"
@@ -1518,8 +1532,8 @@ class ComprehensiveOptimizationModel:
 
                 # Delivery from FG: Total delivery ≤ Total FG inventory
                 self.model += (
-                    pulp.lpSum(self.x_delivery[(v, t)] for v in variants for t in self.weeks if t <= w)
-                    <= pulp.lpSum(self.x_fg_inventory[(v, t)] for v in variants for t in self.weeks if t <= w),
+                    pulp.lpSum(self.x_delivery[(v, t)] for v in variants for t in self.all_weeks if t <= w)
+                    <= pulp.lpSum(self.x_fg_inventory[(v, t)] for v in variants for t in self.all_weeks if t <= w),
                     f"Agg_FG_Deliv_{part}_W{w}"
                 )
                 cnt += 1
@@ -2128,27 +2142,31 @@ class ComprehensiveResultsAnalyzer:
     
     def _extract_stage_plans(self):
         print("\n✓ Extracting stage plans...")
+        # Production stages use production weeks (1-5)
+        # Delivery uses full planning horizon
         stages = {
-            'casting': (self.model.x_casting, 'Casting'),
-            'grinding': (self.model.x_grinding, 'Grinding'),
-            'mc1': (self.model.x_mc1, 'Machining-1'),
-            'mc2': (self.model.x_mc2, 'Machining-2'),
-            'mc3': (self.model.x_mc3, 'Machining-3'),
-            'sp1': (self.model.x_sp1, 'Painting-1'),
-            'sp2': (self.model.x_sp2, 'Painting-2'),
-            'sp3': (self.model.x_sp3, 'Painting-3'),
-            'delivery': (self.model.x_delivery, 'Delivery')
+            'casting': (self.model.x_casting, 'Casting', self.model.weeks),
+            'grinding': (self.model.x_grinding, 'Grinding', self.model.weeks),
+            'mc1': (self.model.x_mc1, 'Machining-1', self.model.weeks),
+            'mc2': (self.model.x_mc2, 'Machining-2', self.model.weeks),
+            'mc3': (self.model.x_mc3, 'Machining-3', self.model.weeks),
+            'sp1': (self.model.x_sp1, 'Painting-1', self.model.weeks),
+            'sp2': (self.model.x_sp2, 'Painting-2', self.model.weeks),
+            'sp3': (self.model.x_sp3, 'Painting-3', self.model.weeks),
+            'delivery': (self.model.x_delivery, 'Delivery', self.model.all_weeks)
         }
         stage_plans = {}
-        
-        for stage_name, (stage_vars, stage_label) in stages.items():
+
+        for stage_name, (stage_vars, stage_label, week_range) in stages.items():
             stage_data = []
             for v in self.split_demand:
                 part, due_w = self.part_week_mapping[v]
                 if part not in self.params:
                     continue
-                
-                for w in self.weeks:
+
+                for w in week_range:
+                    if (v, w) not in stage_vars:
+                        continue  # Skip if variable doesn't exist
                     units = float(pulp.value(stage_vars[(v, w)]) or 0)
                     if units < 0.1:
                         continue
@@ -2313,13 +2331,14 @@ class ComprehensiveResultsAnalyzer:
     def _analyze_vacuum_utilization(self):
         """Analyze vacuum line utilization."""
         print("\n✓ Analyzing vacuum line utilization...")
-        
+
         BIG_LINE_CAP_MIN = 12 * 2 * 0.9 * 6 * 60  # 7,776 min/week
         SMALL_LINE_CAP_MIN = 12 * 2 * 0.9 * 6 * 60
         VACUUM_PENALTY = self.config.VACUUM_CAPACITY_PENALTY
-        
+
         vacuum_util_rows = []
-        for w in self.weeks:
+        # Use production weeks (casting only happens in production weeks)
+        for w in self.model.weeks:
             big_line_minutes = 0
             small_line_minutes = 0
             big_vacuum_minutes = 0
