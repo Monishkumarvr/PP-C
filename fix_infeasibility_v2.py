@@ -280,5 +280,14 @@ class CorrectedInfeasibilityFixer:
 
 
 if __name__ == "__main__":
-    fixer = CorrectedInfeasibilityFixer()
+    import sys
+
+    if len(sys.argv) > 1:
+        master_file = sys.argv[1]
+        print(f"Using master file: {master_file}")
+        print()
+        fixer = CorrectedInfeasibilityFixer(master_file=master_file)
+    else:
+        fixer = CorrectedInfeasibilityFixer()
+
     fixer.run_all_fixes()
