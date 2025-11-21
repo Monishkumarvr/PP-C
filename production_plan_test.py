@@ -84,8 +84,8 @@ class ProductionConfig:
         # Penalties
         self.UNMET_DEMAND_PENALTY = 200000  # Cost of not fulfilling orders (increased 5x to force fulfillment)
         self.LATENESS_PENALTY = 150000  # Cost per week late (increased 3x from 50k to prioritize on-time delivery)
-        self.INVENTORY_HOLDING_COST = 0  # CHANGED TO 0: Allow early production to maximize utilization
-        self.MAX_EARLY_WEEKS = 20  # NOTE: Has NO effect when INVENTORY_HOLDING_COST=0 (0 × anything = 0)
+        self.INVENTORY_HOLDING_COST = 0  # MAXIMIZATION MODE: No penalty - keep 100% utilization till demand exhausted
+        self.MAX_EARLY_WEEKS = 4  # Limit to 4 weeks early (with cost=0, only prevents VERY early production)
         self.STARTUP_BONUS = -50
         self.SETUP_PENALTY = 5  # Setup changeover penalty
 
