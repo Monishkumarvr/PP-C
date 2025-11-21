@@ -3602,10 +3602,10 @@ class FixedExecutiveReportGenerator:
 def main():
     """Generate FIXED executive report with Master Data enrichment"""
 
-    detailed_output = 'production_plan_comprehensive_test.xlsx'
+    detailed_output = 'production_plan_COMPREHENSIVE_test.xlsx'
     executive_output = 'production_plan_EXECUTIVE_test.xlsx'
     master_data = 'Master_Data_Updated_Nov_Dec.xlsx'  # Master Data file
-    start_date = datetime(2025, 10, 1)  # Changed from Oct 16 to Oct 1 to reduce late deliveries
+    start_date = datetime(2025, 11, 22)  # Planning start date (November 22, 2025)
     
     print("="*80)
     print("EXECUTIVE REPORT GENERATOR - WITH MASTER DATA ENRICHMENT")
