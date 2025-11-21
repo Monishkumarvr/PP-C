@@ -1286,7 +1286,25 @@ class ComprehensiveOptimizationModel:
                 else:
                     self.x_sp3[(variant, w)] = 0  # Part skips SP3
                 
-                delivery_ub = demand_up if window_start <= w <= window_end else 0
+                # SELECTIVE WINDOW RELAXATION: Relax windows ONLY for WIP-covered variants
+                # Logic: WIP should flow freely through available capacity
+                #        New production maintains tight windows to maximize casting utilization
+                part, due_week = self.part_week_mapping[variant]
+                has_wip = False
+                if part in self.stage_start_qty:
+                    casting_req = self.stage_start_qty[part].get('casting', 0)
+                    net_req = self.stage_start_qty[part].get('net', 0)
+                    # If casting < net, then WIP exists (CS, GR, MC, SP, or FG WIP)
+                    has_wip = (casting_req < net_req) if net_req > 0 else False
+
+                if has_wip and w <= window_end:
+                    # WIP-covered: Allow early delivery (process through free capacity)
+                    delivery_ub = demand_up
+                elif window_start <= w <= window_end:
+                    # New production: Tight windows (maintain front-loading)
+                    delivery_ub = demand_up
+                else:
+                    delivery_ub = 0  # Outside window
                 self.x_delivery[(variant, w)] = pulp.LpVariable(
                     f"deliver_{variant}_W{w}", lowBound=0, upBound=delivery_ub, cat='Continuous'
                 )
@@ -1378,7 +1396,7 @@ class ComprehensiveOptimizationModel:
                     objective_terms.append(
                         self.config.INVENTORY_HOLDING_COST * excess_early * self.x_delivery[(v, w)]
                     )
-        
+
         # ✅ ENHANCED: Startup practice bonus removed to avoid incentivizing overproduction
         
         # ✅ FIXED: Setup penalty (minimize changeovers)
