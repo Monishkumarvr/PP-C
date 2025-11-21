@@ -47,7 +47,7 @@ class ProductionConfig:
         self.CURRENT_DATE = datetime(2025, 11, 22)  # Planning start date (November 22, 2025)
         self.PLANNING_WEEKS = None  # Optimization horizon (DYNAMIC - calculated from sales orders + buffer)
         self.TRACKING_WEEKS = None  # Tracking horizon (same as planning for now)
-        self.MAX_PLANNING_WEEKS = 100  # Maximum planning horizon (increased to handle far-future orders)
+        self.MAX_PLANNING_WEEKS = 30  # Must cover all orders (auto-extends to latest order + buffer)
         self.PLANNING_BUFFER_WEEKS = 2  # Buffer beyond latest order (for early production capability)
         self.OEE = 0.90
         self.WORKING_DAYS_PER_WEEK = 6
