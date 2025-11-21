@@ -44,7 +44,7 @@ class ProductionConfig:
     
     def __init__(self):
         # Basic parameters
-        self.CURRENT_DATE = datetime(2025, 10, 1)  # Changed from Oct 16 to Oct 1 to reduce late deliveries
+        self.CURRENT_DATE = datetime(2025, 11, 22)  # Planning start date (November 22, 2025)
         self.PLANNING_WEEKS = None  # Optimization horizon (DYNAMIC - calculated from sales orders + buffer)
         self.TRACKING_WEEKS = None  # Tracking horizon (same as planning for now)
         self.MAX_PLANNING_WEEKS = 30  # Maximum planning horizon (safety limit)
@@ -84,8 +84,8 @@ class ProductionConfig:
         # Penalties
         self.UNMET_DEMAND_PENALTY = 200000  # Cost of not fulfilling orders (increased 5x to force fulfillment)
         self.LATENESS_PENALTY = 150000  # Cost per week late (increased 3x from 50k to prioritize on-time delivery)
-        self.INVENTORY_HOLDING_COST = 1  # Cost per unit per week for holding inventory (reduced 10x to encourage early production)
-        self.MAX_EARLY_WEEKS = 8  # Maximum weeks to produce before delivery date (for inventory holding)
+        self.INVENTORY_HOLDING_COST = 0  # CHANGED TO 0: Allow early production to maximize utilization
+        self.MAX_EARLY_WEEKS = 20  # Maximum weeks to produce before delivery date (increased to allow early production)
         self.STARTUP_BONUS = -50
         self.SETUP_PENALTY = 5  # Setup changeover penalty
 
