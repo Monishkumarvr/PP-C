@@ -47,8 +47,8 @@ class ProductionConfig:
         self.CURRENT_DATE = datetime(2025, 11, 22)  # Planning start date (November 22, 2025)
         self.PLANNING_WEEKS = None  # Optimization horizon (DYNAMIC - calculated from sales orders + buffer)
         self.TRACKING_WEEKS = None  # Tracking horizon (same as planning for now)
-        self.MAX_PLANNING_WEEKS = 30  # Maximum planning horizon (safety limit)
-        self.PLANNING_BUFFER_WEEKS = 2  # Buffer beyond latest order (increased from 2 to allow production spreading)
+        self.MAX_PLANNING_WEEKS = 100  # Maximum planning horizon (increased to handle far-future orders)
+        self.PLANNING_BUFFER_WEEKS = 2  # Buffer beyond latest order (for early production capability)
         self.OEE = 0.90
         self.WORKING_DAYS_PER_WEEK = 6
         self.WORKING_HOURS_PER_DAY = 24  # Hours available per day for cooling/shakeout
@@ -85,7 +85,7 @@ class ProductionConfig:
         self.UNMET_DEMAND_PENALTY = 200000  # Cost of not fulfilling orders (increased 5x to force fulfillment)
         self.LATENESS_PENALTY = 150000  # Cost per week late (increased 3x from 50k to prioritize on-time delivery)
         self.INVENTORY_HOLDING_COST = 0  # CHANGED TO 0: Allow early production to maximize utilization
-        self.MAX_EARLY_WEEKS = 20  # Maximum weeks to produce before delivery date (increased to allow early production)
+        self.MAX_EARLY_WEEKS = 20  # NOTE: Has NO effect when INVENTORY_HOLDING_COST=0 (0 × anything = 0)
         self.STARTUP_BONUS = -50
         self.SETUP_PENALTY = 5  # Setup changeover penalty
 
