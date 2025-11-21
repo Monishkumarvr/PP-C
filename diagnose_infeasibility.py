@@ -21,7 +21,7 @@ warnings.filterwarnings('ignore')
 class InfeasibilityDiagnostics:
     """Comprehensive diagnostics for optimization infeasibility"""
 
-    def __init__(self, master_file='Master_Data_Updated_Nov_Dec_FIXED.xlsx'):
+    def __init__(self, master_file='Master_Data_Updated_Nov_Dec_FIXED_V2.xlsx'):
         self.master_file = master_file
         self.issues = []
         self.warnings_list = []
@@ -262,7 +262,8 @@ class InfeasibilityDiagnostics:
         part_master_dedup = self.part_master.drop_duplicates(subset=['FG Code'], keep='first')
         part_master_dict = part_master_dedup.set_index('FG Code').to_dict('index')
 
-        infeasible_orders = []
+        backlog_orders = []
+        rush_orders = []
 
         for _, order in valid_orders.iterrows():
             part = order['Material Code']
@@ -305,8 +306,17 @@ class InfeasibilityDiagnostics:
             # Calculate available time
             available_days = (delivery_date - self.CURRENT_DATE).days
 
-            if available_days < total_lead_days:
-                infeasible_orders.append({
+            if available_days < 0:
+                # Backlog order (past due) - this is OK, will incur lateness penalty
+                backlog_orders.append({
+                    'Part': part,
+                    'Qty': order['Balance Qty'],
+                    'Delivery': delivery_date.strftime('%Y-%m-%d'),
+                    'Days_Late': -available_days
+                })
+            elif available_days < total_lead_days:
+                # Rush order - insufficient lead time but not past due yet
+                rush_orders.append({
                     'Part': part,
                     'Qty': order['Balance Qty'],
                     'Delivery': delivery_date.strftime('%Y-%m-%d'),
@@ -315,28 +325,53 @@ class InfeasibilityDiagnostics:
                     'Shortfall_Days': total_lead_days - available_days
                 })
 
-        if infeasible_orders:
-            print(f"❌ Found {len(infeasible_orders)} orders with insufficient lead time:")
+        # Report backlog orders (INFO - not an error)
+        if backlog_orders:
+            print(f"📊 Found {len(backlog_orders)} backlog orders (past due):")
+            print("   → These will be produced ASAP and delivered late (with penalties)")
             print()
-            print(f"{'Part':<15} {'Qty':<8} {'Delivery':<12} {'Avail':<8} {'Need':<8} {'Short':<8}")
-            print("-" * 70)
+            print(f"   {'Part':<15} {'Qty':<8} {'Original Due':<15} {'Days Late'}")
+            print("   " + "-" * 60)
 
-            for order in infeasible_orders[:20]:
-                print(f"{order['Part']:<15} {order['Qty']:<8.0f} {order['Delivery']:<12} "
+            for order in backlog_orders[:10]:
+                print(f"   {order['Part']:<15} {order['Qty']:<8.0f} {order['Delivery']:<15} {order['Days_Late']:.0f}")
+
+            if len(backlog_orders) > 10:
+                print(f"   ... and {len(backlog_orders) - 10} more backlog orders")
+
+            print()
+            print("   ℹ️  This is not an error - optimizer handles backlogs automatically")
+            print()
+
+        # Report rush orders (WARNING - might be tight but not infeasible)
+        if rush_orders:
+            print(f"⚠️  Found {len(rush_orders)} rush orders (tight lead time but not past due):")
+            print()
+            print(f"   {'Part':<15} {'Qty':<8} {'Delivery':<12} {'Avail':<8} {'Need':<8} {'Short':<8}")
+            print("   " + "-" * 70)
+
+            for order in rush_orders[:10]:
+                print(f"   {order['Part']:<15} {order['Qty']:<8.0f} {order['Delivery']:<12} "
                       f"{order['Available_Days']:<8.0f} {order['Required_Days']:<8.1f} "
                       f"{order['Shortfall_Days']:<8.1f}")
 
-            if len(infeasible_orders) > 20:
-                print(f"... and {len(infeasible_orders) - 20} more orders")
+            if len(rush_orders) > 10:
+                print(f"   ... and {len(rush_orders) - 10} more rush orders")
 
-            self.issues.append({
-                'severity': 'CRITICAL',
+            print()
+            print("   ⚠️  These may be produced/delivered slightly late")
+            print()
+
+            self.warnings_list.append({
+                'severity': 'WARNING',
                 'category': 'Lead Time',
-                'issue': f'{len(infeasible_orders)} orders cannot meet delivery date',
-                'details': infeasible_orders[:10]
+                'issue': f'{len(rush_orders)} rush orders with tight lead time',
+                'details': rush_orders[:20]
             })
-        else:
+
+        if not backlog_orders and not rush_orders:
             print("✓ All orders have sufficient lead time")
+            print()
 
         print()
 
