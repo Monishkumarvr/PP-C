@@ -1126,18 +1126,17 @@ class BoxCapacityManager:
         print("\n" + "="*80)
         print("PROCESSING BOX CAPACITIES")
         print("="*80)
-        
-        casting_shifts = 1
-        for machine in self.machine_manager.machines.values():
-            if 'Casting' in str(machine['operation']):
-                casting_shifts = max(casting_shifts, int(machine['num_shifts']))
-        
+
+        # ✅ FIX: Weekly_Capacity is already TOTAL capacity per week, NOT per shift
+        # Do NOT multiply by shifts (same bug as machine capacity issue)
+        # Master Data states: "Weekly_Capacity" = total moulds available per week
+
         for _, row in self.box_capacity_df.iterrows():
             box_size = str(row['Box_Size']).strip()
-            base_weekly_capacity = int(row['Weekly_Capacity'])
-            corrected_weekly_capacity = base_weekly_capacity * casting_shifts
-            self.capacities[box_size] = corrected_weekly_capacity
-        
+            weekly_capacity = int(row['Weekly_Capacity'])
+            self.capacities[box_size] = weekly_capacity
+            print(f"  Box {box_size}: {weekly_capacity} moulds/week")
+
         print(f"✓ Loaded {len(self.capacities)} box sizes")
     
     def get_capacity(self, box_size):
@@ -2096,34 +2095,42 @@ class ComprehensiveOptimizationModel:
                         )
 
     def _add_box_constraints(self):
+        print("  ✅ Adding mould box capacity constraints...")
+
         box_variants = defaultdict(list)
         for v in self.split_demand:
             part, _ = self.part_week_mapping[v]
             if part not in self.params:
                 continue
-            
+
             box_size = self.params[part]['box_size']
             box_qty = self.params[part]['box_quantity']
             if box_size and box_size != 'Unknown' and (box_qty or 0) > 0:
                 box_variants[box_size].append((v, max(1, int(box_qty))))
-        
+
+        constraints_added = 0
         for box_size, vlist in box_variants.items():
             base_cap = self.box_manager.get_capacity(box_size)
             if base_cap == 0:
                 continue
-            
+
             eff_cap = base_cap * 0.90
+            print(f"    Box {box_size}: {base_cap} base → {eff_cap:.1f} effective moulds/week (90% OEE)")
+
             for w in self.weeks:
                 terms = []
                 for (v, box_qty) in vlist:
                     moulds_per_unit = 1.0 / float(box_qty)
                     terms.append(self.x_casting[(v, w)] * moulds_per_unit)
-                
+
                 if terms:
                     self.model += (
                         pulp.lpSum(terms) <= eff_cap,
                         f"Box_{box_size}_W{w}"
                     )
+                    constraints_added += 1
+
+        print(f"    ✓ Added {constraints_added} box capacity constraints")
 
     def _build_minimum_utilization_constraints(self):
         """
