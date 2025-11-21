@@ -44,7 +44,7 @@ class ProductionConfig:
     
     def __init__(self):
         # Basic parameters
-        self.CURRENT_DATE = datetime(2025, 11, 22)  # Planning start date (November 22, 2025)
+        self.CURRENT_DATE = datetime(2025, 11, 21)  # Planning start date (TODAY: November 21, 2025)
         self.PLANNING_WEEKS = None  # Optimization horizon (DYNAMIC - calculated from sales orders + buffer)
         self.PRODUCTION_WEEKS = 5  # ✅ Concentrate production in Weeks 1-5 → High utilization
         self.TRACKING_WEEKS = None  # Tracking horizon (same as planning for now)

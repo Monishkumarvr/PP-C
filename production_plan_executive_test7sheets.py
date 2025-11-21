@@ -3605,7 +3605,7 @@ def main():
     detailed_output = 'production_plan_COMPREHENSIVE_test.xlsx'
     executive_output = 'production_plan_EXECUTIVE_test.xlsx'
     master_data = 'Master_Data_Updated_Nov_Dec.xlsx'  # Master Data file
-    start_date = datetime(2025, 11, 22)  # Planning start date (November 22, 2025)
+    start_date = datetime(2025, 11, 21)  # Planning start date (TODAY: November 21, 2025)
     
     print("="*80)
     print("EXECUTIVE REPORT GENERATOR - WITH MASTER DATA ENRICHMENT")
