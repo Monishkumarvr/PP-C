@@ -1052,23 +1052,26 @@ class MachineResourceManager:
             code = str(row.get('Resource Code', '')).strip()
             if not code or code == 'nan':
                 continue
-            
+
             num_resources = self._safe_int(row.get('No Of Resource', 1))
             hours_per_day = self._safe_float(row.get('Available Hours per Day', 8))
             num_shifts = self._safe_int(row.get('No of Shift', 1))
-            
-            actual_hours_per_day = hours_per_day * num_shifts
-            total_hours_day = actual_hours_per_day * num_resources
+
+            # ✅ FIX: Available Hours per Day is already TOTAL hours per day (not per shift)
+            # For example: Small Vacuum has 16 hrs/day with 2 shifts = 8 hrs per shift
+            # So we use hours_per_day directly, NOT multiply by num_shifts
+            hours_per_shift = hours_per_day / num_shifts if num_shifts > 0 else hours_per_day
+            total_hours_day = hours_per_day * num_resources  # Total across all machines
             effective_hours_day = total_hours_day * self.config.OEE
             weekly_hours = effective_hours_day * self.config.WORKING_DAYS_PER_WEEK
-            
+
             self.machines[code] = {
                 'name': str(row.get('Resource Name', code)),
                 'operation': str(row.get('Operation Name', '')),
                 'num_resources': num_resources,
-                'hours_per_shift': hours_per_day,
+                'hours_per_shift': hours_per_shift,
                 'num_shifts': num_shifts,
-                'hours_per_day': actual_hours_per_day,
+                'hours_per_day': hours_per_day,  # This is already total hours per day
                 'weekly_hours': weekly_hours
             }
         
@@ -1768,11 +1771,28 @@ class ComprehensiveOptimizationModel:
         """✅ COMPREHENSIVE: Casting constraints WITH pattern change setup time AND vacuum penalty."""
         print("  ✅ Adding casting capacity WITH SETUP TIME + VACUUM PENALTY...")
 
-        BIG_LINE_CAP = 12 * 2 * 0.9 * 6 * 60  # 7,776 min/week
-        SMALL_LINE_CAP = 12 * 2 * 0.9 * 6 * 60
+        # ✅ FIX: Read casting capacity from Machine Constraints instead of hard-coding
+        # Look for Big Vacuum and Small Vacuum resources
+        big_line_weekly_hours = 0
+        small_line_weekly_hours = 0
+
+        for res_code, machine_data in self.machine_manager.machines.items():
+            name = machine_data.get('name', '').lower()
+            if 'big' in name and 'vacuum' in name:
+                big_line_weekly_hours = machine_data.get('weekly_hours', 0)
+            elif 'small' in name and 'vacuum' in name:
+                small_line_weekly_hours = machine_data.get('weekly_hours', 0)
+
+        # Convert hours to minutes for casting constraints
+        BIG_LINE_CAP = big_line_weekly_hours * 60 if big_line_weekly_hours > 0 else 7776  # min/week
+        SMALL_LINE_CAP = small_line_weekly_hours * 60 if small_line_weekly_hours > 0 else 7776  # min/week
+
         CASTING_TON_PER_WEEK = 800
         SETUP_TIME = self.config.PATTERN_CHANGE_TIME_MIN
         VACUUM_PENALTY = self.config.VACUUM_CAPACITY_PENALTY
+
+        print(f"    ✓ Big Line capacity: {BIG_LINE_CAP/60:.1f} hrs/week ({BIG_LINE_CAP:,.0f} min/week)")
+        print(f"    ✓ Small Line capacity: {SMALL_LINE_CAP/60:.1f} hrs/week ({SMALL_LINE_CAP:,.0f} min/week)")
 
         for w in self.weeks:
             big_line_time = []
@@ -2119,8 +2139,19 @@ class ComprehensiveOptimizationModel:
 
         # CASTING minimum utilization
         print(f"  ✅ Casting: targeting {TARGET_UTILIZATION*100:.0f}% utilization...")
-        BIG_LINE_CAP = 12 * 2 * 0.9 * 6 * 60  # 7,776 min/week
-        SMALL_LINE_CAP = 12 * 2 * 0.9 * 6 * 60
+
+        # ✅ FIX: Read casting capacity from Machine Constraints
+        big_line_weekly_hours = 0
+        small_line_weekly_hours = 0
+        for res_code, machine_data in self.machine_manager.machines.items():
+            name = machine_data.get('name', '').lower()
+            if 'big' in name and 'vacuum' in name:
+                big_line_weekly_hours = machine_data.get('weekly_hours', 0)
+            elif 'small' in name and 'vacuum' in name:
+                small_line_weekly_hours = machine_data.get('weekly_hours', 0)
+
+        BIG_LINE_CAP = big_line_weekly_hours * 60 if big_line_weekly_hours > 0 else 7776  # min/week
+        SMALL_LINE_CAP = small_line_weekly_hours * 60 if small_line_weekly_hours > 0 else 7776  # min/week
 
         for w in self.weeks:
             big_line_time = []
@@ -2620,9 +2651,19 @@ class ComprehensiveResultsAnalyzer:
     def _analyze_vacuum_utilization(self):
         """Analyze vacuum line utilization."""
         print("\n✓ Analyzing vacuum line utilization...")
-        
-        BIG_LINE_CAP_MIN = 12 * 2 * 0.9 * 6 * 60  # 7,776 min/week
-        SMALL_LINE_CAP_MIN = 12 * 2 * 0.9 * 6 * 60
+
+        # ✅ FIX: Read casting capacity from Machine Constraints
+        big_line_weekly_hours = 0
+        small_line_weekly_hours = 0
+        for res_code, machine_data in self.machine_manager.machines.items():
+            name = machine_data.get('name', '').lower()
+            if 'big' in name and 'vacuum' in name:
+                big_line_weekly_hours = machine_data.get('weekly_hours', 0)
+            elif 'small' in name and 'vacuum' in name:
+                small_line_weekly_hours = machine_data.get('weekly_hours', 0)
+
+        BIG_LINE_CAP_MIN = big_line_weekly_hours * 60 if big_line_weekly_hours > 0 else 7776  # min/week
+        SMALL_LINE_CAP_MIN = small_line_weekly_hours * 60 if small_line_weekly_hours > 0 else 7776  # min/week
         VACUUM_PENALTY = self.config.VACUUM_CAPACITY_PENALTY
         
         vacuum_util_rows = []
