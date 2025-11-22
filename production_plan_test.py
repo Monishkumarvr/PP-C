@@ -2304,12 +2304,17 @@ class ComprehensiveResultsAnalyzer:
                 casting_cycle = params.get('casting_cycle', 0)
                 moulding_line = row.get('Moulding_Line', '')
                 requires_vacuum = params.get('requires_vacuum', False)
+                box_quantity = params.get('box_quantity', 1)
+
+                # Box quantity represents cavity count (units per mould)
+                # Time = (units / box_qty) × cycle_time
+                moulds_per_unit = 1.0 / max(1.0, float(box_quantity))
 
                 effective_cycle = casting_cycle
                 if requires_vacuum and vacuum_penalty > 0:
                     effective_cycle = casting_cycle / vacuum_penalty
 
-                minutes = units * effective_cycle
+                minutes = units * moulds_per_unit * effective_cycle
                 if 'Big Line' in moulding_line:
                     big_line_minutes += minutes
                 elif 'Small Line' in moulding_line:
@@ -2375,8 +2380,9 @@ class ComprehensiveResultsAnalyzer:
         """Analyze vacuum line utilization."""
         print("\n✓ Analyzing vacuum line utilization...")
 
-        BIG_LINE_CAP_MIN = 12 * 2 * 0.9 * 6 * 60  # 7,776 min/week
-        SMALL_LINE_CAP_MIN = 12 * 2 * 0.9 * 6 * 60
+        # Use dynamic capacity from machine_manager (already in hours/week)
+        BIG_LINE_CAP_MIN = self.machine_manager.get_machine_capacity('KVCV3BHCS001') * 60
+        SMALL_LINE_CAP_MIN = self.machine_manager.get_machine_capacity('KVCVC3HCS001') * 60
         VACUUM_PENALTY = self.config.VACUUM_CAPACITY_PENALTY
 
         vacuum_util_rows = []
