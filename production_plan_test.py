@@ -69,7 +69,7 @@ class ProductionConfig:
         self.AVG_LEAD_TIME_WEEKS = 4  # Average lead time for forecasting beyond-horizon orders
 
         # Delivery flexibility
-        self.DELIVERY_BUFFER_WEEKS = 1  # Tight window (±1 week) forces front-loading - OPTIMAL!
+        self.DELIVERY_BUFFER_WEEKS = 2  # Allow ±2 weeks to use available capacity when early weeks are full
         # Vacuum moulding line capacities
         self.BIG_LINE_HOURS_PER_SHIFT = 12
         self.SMALL_LINE_HOURS_PER_SHIFT = 12
