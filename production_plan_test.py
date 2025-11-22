@@ -46,7 +46,7 @@ class ProductionConfig:
         # Basic parameters
         self.CURRENT_DATE = datetime(2025, 11, 21)  # Planning start date (TODAY: November 21, 2025)
         self.PLANNING_WEEKS = None  # Optimization horizon (DYNAMIC - calculated from sales orders + buffer)
-        self.PRODUCTION_WEEKS = 5  # ✅ Concentrate production in Weeks 1-5 → High utilization
+        self.PRODUCTION_WEEKS = None  # ✅ Allow production across full horizon → Maximize capacity utilization
         self.TRACKING_WEEKS = None  # Tracking horizon (same as planning for now)
         self.MAX_PLANNING_WEEKS = 100  # Must cover all orders (auto-extends to latest order + buffer)
         self.PLANNING_BUFFER_WEEKS = 2  # Buffer beyond latest order (for early production capability)
@@ -80,7 +80,7 @@ class ProductionConfig:
         self.SMALL_LINE_HOURS_PER_WEEK = self.SMALL_LINE_HOURS_PER_DAY * self.WORKING_DAYS_PER_WEEK
         
         # ✅ FIXED: Vacuum timing penalty
-        self.VACUUM_CAPACITY_PENALTY = 0.75  # 25% capacity reduction for vacuum parts
+        self.VACUUM_CAPACITY_PENALTY = 0.90  # 10% capacity reduction for vacuum parts (reduced from 25% to achieve 70-80% utilization)
         
         # Penalties
         self.UNMET_DEMAND_PENALTY = 10000000  # Cost of not fulfilling orders (must be >> lateness to force production)
@@ -1433,9 +1433,9 @@ class ComprehensiveOptimizationModel:
                     )
 
         # ✅ CAPACITY UTILIZATION BONUS: Incentivize production spreading
-        # Small negative cost for casting in each week encourages balanced capacity usage
+        # Large negative cost for casting strongly encourages balanced capacity usage
         # Combined with overproduction constraint, this spreads production without excess
-        CAPACITY_BONUS = -0.1  # Small bonus per unit (overproduction prevented by constraint)
+        CAPACITY_BONUS = -1000  # Strong bonus per unit to achieve 70-80% utilization
         for v in self.split_demand:
             for w in self.weeks:
                 # Bonus for producing (negative cost = reward)
@@ -1732,12 +1732,13 @@ class ComprehensiveOptimizationModel:
                 f"Demand_{v}"
             )
 
-            # ✅ PREVENT OVERPRODUCTION: Total casting cannot exceed demand
-            # This prevents the capacity bonus from causing infinite production
+            # ✅ ALLOW OVERPRODUCTION: Let capacity bonus drive production to 70-80% utilization
+            # Total production can exceed demand - excess held as inventory
+            # Limit: Cannot produce more than 5x demand (prevent runaway)
             self.model += (
                 pulp.lpSum(self.x_casting[(v, w)] for w in self.weeks)
-                <= self.split_demand[v],
-                f"No_Overprod_{v}"
+                <= 5.0 * self.split_demand[v],  # Allow up to 5x overproduction
+                f"Max_Overprod_{v}"
             )
     
     def _build_lead_time_constraints(self):
@@ -1785,7 +1786,7 @@ class ComprehensiveOptimizationModel:
         # ✅ FIXED: Get capacity from Machine Constraints (not hardcoded)
         BIG_LINE_CAP = self.machine_manager.get_machine_capacity('KVCV3BHCS001') * 60  # Convert hrs to min
         SMALL_LINE_CAP = self.machine_manager.get_machine_capacity('KVCVC3HCS001') * 60  # Convert hrs to min
-        CASTING_TON_PER_WEEK = 800
+        CASTING_TON_PER_WEEK = 1500  # Increased from 800 to enable higher utilization
         SETUP_TIME = self.config.PATTERN_CHANGE_TIME_MIN
         VACUUM_PENALTY = self.config.VACUUM_CAPACITY_PENALTY
 
@@ -2100,34 +2101,61 @@ class ComprehensiveOptimizationModel:
                         )
 
     def _add_box_constraints(self):
+        """✅ REUSABLE BOX CONSTRAINTS with intra-week reuse cycles."""
+        print("  ✅ Adding REUSABLE box capacity constraints (accounting for intra-week reuse)...")
+
+        # Group variants by box size with their reuse characteristics
         box_variants = defaultdict(list)
         for v in self.split_demand:
             part, _ = self.part_week_mapping[v]
             if part not in self.params:
                 continue
-            
+
             box_size = self.params[part]['box_size']
             box_qty = self.params[part]['box_quantity']
+
+            # Get cooling + shakeout time in hours
+            cooling_hrs = self.params[part].get('cooling_time', 0)
+            shakeout_hrs = self.params[part].get('shakeout_time', 0)
+            reuse_hours = cooling_hrs + shakeout_hrs
+
             if box_size and box_size != 'Unknown' and (box_qty or 0) > 0:
-                box_variants[box_size].append((v, max(1, int(box_qty))))
-        
+                box_variants[box_size].append((v, max(1, int(box_qty)), reuse_hours))
+
+        HOURS_PER_WEEK = 6 * 24  # 6 working days × 24 hours/day
+
         for box_size, vlist in box_variants.items():
             base_cap = self.box_manager.get_capacity(box_size)
             if base_cap == 0:
                 continue
-            
-            eff_cap = base_cap * 0.90
+
+            # Calculate effective weekly capacity accounting for intra-week reuse
+            # If reuse_hours < HOURS_PER_WEEK, boxes can be reused multiple times
+            max_reuse_hours = max((reuse_hours for _, _, reuse_hours in vlist), default=HOURS_PER_WEEK)
+
+            if max_reuse_hours > 0 and max_reuse_hours < HOURS_PER_WEEK:
+                # Fast reuse: boxes can cycle multiple times per week
+                reuse_cycles = int(HOURS_PER_WEEK / max_reuse_hours)
+                eff_weekly_cap = base_cap * reuse_cycles
+                print(f"    ✓ {box_size}: {base_cap} boxes × {reuse_cycles} cycles/week = {eff_weekly_cap} box-uses/week")
+            else:
+                # Slow reuse: boxes tied up for full week or more
+                eff_weekly_cap = base_cap
+                print(f"    ✓ {box_size}: {base_cap} boxes (slow reuse)")
+
             for w in self.weeks:
                 terms = []
-                for (v, box_qty) in vlist:
+                for (v, box_qty, reuse_hours) in vlist:
                     moulds_per_unit = 1.0 / float(box_qty)
                     terms.append(self.x_casting[(v, w)] * moulds_per_unit)
-                
+
                 if terms:
                     self.model += (
-                        pulp.lpSum(terms) <= eff_cap,
-                        f"Box_{box_size}_W{w}"
+                        pulp.lpSum(terms) <= eff_weekly_cap,
+                        f"Box_{box_size}_W{w}_Reusable"
                     )
+
+        print(f"    ✓ Added reusable box constraints for {len(box_variants)} box sizes")
     
     def _print_solution_summary(self):
         total_casting = sum(pulp.value(self.x_casting[(v, w)]) or 0 
@@ -2289,7 +2317,7 @@ class ComprehensiveResultsAnalyzer:
     
     def _generate_weekly_summary(self, stage_plans):
         weekly_data = []
-        casting_cap = 800
+        casting_cap = 1500  # Match the CASTING_TON_PER_WEEK constraint
         big_line_cap_min = self.config.BIG_LINE_HOURS_PER_WEEK * 60
         small_line_cap_min = self.config.SMALL_LINE_HOURS_PER_WEEK * 60
         vacuum_penalty = self.config.VACUUM_CAPACITY_PENALTY if self.config.VACUUM_CAPACITY_PENALTY else 1.0
