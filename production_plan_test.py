@@ -2556,8 +2556,9 @@ class ShipmentFulfillmentAnalyzer:
 
             if pd.notna(committed_date):
                 days_diff = (committed_date - self.config.CURRENT_DATE).days
-                committed_week = max(1, min(self.config.PLANNING_WEEKS,
-                                           int(days_diff / 7) + 1))
+                # Allow negative weeks for past-due orders (don't enforce min of 1)
+                committed_week = min(self.config.PLANNING_WEEKS,
+                                    int(days_diff / 7) + 1)
             else:
                 committed_week = self.config.PLANNING_WEEKS // 2
 
