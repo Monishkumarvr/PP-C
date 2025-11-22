@@ -1319,9 +1319,10 @@ class ComprehensiveOptimizationModel:
                     f"fg_inv_{part}_W{w}", lowBound=0, cat='Continuous'
                 )
 
-        # ✅ Delivery variables span FULL planning horizon (delivery from FG inventory)
-        # Production happens in Weeks 1-5, delivery respects customer windows across all weeks
-        print("✓ Creating delivery variables for full planning horizon...")
+        # ✅ DECOUPLE PRODUCTION FROM DELIVERY: Allow delivery in any week
+        # Production maximizes capacity, delivery happens from FG inventory
+        # Late delivery is penalized in objective (soft constraint), not blocked (hard constraint)
+        print("✓ Creating delivery variables for full planning horizon (DECOUPLED)...")
         for variant in self.split_demand:
             demand_up = float(self.split_demand[variant])
             window_start, window_end = self.variant_windows.get(
@@ -1329,11 +1330,9 @@ class ComprehensiveOptimizationModel:
             )
 
             for w in self.all_weeks:  # Full horizon (not just production weeks)
-                # Delivery window constraint (±1 week from due date)
-                if window_start <= w <= window_end:
-                    delivery_ub = demand_up
-                else:
-                    delivery_ub = 0  # Cannot deliver outside window
+                # CHANGE: Allow delivery in ANY week (remove hard constraint)
+                # Lateness penalty will be added to objective function
+                delivery_ub = demand_up  # Always allow delivery
 
                 self.x_delivery[(variant, w)] = pulp.LpVariable(
                     f"deliver_{variant}_W{w}", lowBound=0, upBound=delivery_ub, cat='Continuous'
@@ -1433,12 +1432,20 @@ class ComprehensiveOptimizationModel:
                         self.config.INVENTORY_HOLDING_COST * excess_early * self.x_delivery[(v, w)]
                     )
 
-        # ✅ ENHANCED: Startup practice bonus removed to avoid incentivizing overproduction
+        # ✅ CAPACITY UTILIZATION BONUS: Incentivize production spreading
+        # Small negative cost for casting in each week encourages balanced capacity usage
+        # Combined with overproduction constraint, this spreads production without excess
+        CAPACITY_BONUS = -0.1  # Small bonus per unit (overproduction prevented by constraint)
+        for v in self.split_demand:
+            for w in self.weeks:
+                # Bonus for producing (negative cost = reward)
+                # This incentivizes spreading production across all weeks
+                objective_terms.append(CAPACITY_BONUS * self.x_casting[(v, w)])
 
         # ✅ FIXED: Setup penalty (minimize changeovers)
         for key in self.y_part_line:
             objective_terms.append(self.config.SETUP_PENALTY * self.y_part_line[key])
-        
+
         self.model += pulp.lpSum(objective_terms), "Objective"
     
     def _build_flow_constraints_with_stage_seriality(self):
@@ -1723,6 +1730,14 @@ class ComprehensiveOptimizationModel:
                 pulp.lpSum(self.x_delivery[(v, w)] for w in self.all_weeks) + self.unmet_demand[v]
                 == self.split_demand[v],
                 f"Demand_{v}"
+            )
+
+            # ✅ PREVENT OVERPRODUCTION: Total casting cannot exceed demand
+            # This prevents the capacity bonus from causing infinite production
+            self.model += (
+                pulp.lpSum(self.x_casting[(v, w)] for w in self.weeks)
+                <= self.split_demand[v],
+                f"No_Overprod_{v}"
             )
     
     def _build_lead_time_constraints(self):
