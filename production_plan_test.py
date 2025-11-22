@@ -1199,7 +1199,7 @@ class ComprehensiveOptimizationModel:
         print("="*80)
 
         solver = PULP_CBC_CMD(
-            timeLimit=600,  # 10 minutes - allow solver more time to find better solution
+            timeLimit=120,  # 2 minutes - fast optimization for daily runs
             threads=8,
             msg=1
         )
@@ -2329,10 +2329,10 @@ class ComprehensiveResultsAnalyzer:
                 'Big_Line_Tons': wc_big['Total_Weight_ton'].sum(),
                 'Big_Line_Hours': round(big_line_hours, 2),
                 'Big_Line_Util_%': round(big_line_util, 1),
-                'Big_Line_Capacity_Hours': self.config.BIG_LINE_HOURS_PER_WEEK,
+                'Big_Line_Capacity_Hours': self.machine_manager.get_machine_capacity('KVCV3BHCS001'),
                 'Small_Line_Hours': round(small_line_hours, 2),
                 'Small_Line_Util_%': round(small_line_util, 1),
-                'Small_Line_Capacity_Hours': self.config.SMALL_LINE_HOURS_PER_WEEK,
+                'Small_Line_Capacity_Hours': self.machine_manager.get_machine_capacity('KVCVC3HCS001'),
                 'Vacuum_Units': wc_vacuum['Units'].sum(),
                 'Grinding_Units': wg['Units'].sum(),
                 'MC1_Units': wm1['Units'].sum(),
