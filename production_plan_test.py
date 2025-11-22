@@ -70,15 +70,10 @@ class ProductionConfig:
 
         # Delivery flexibility
         self.DELIVERY_BUFFER_WEEKS = 2  # Allow ±2 weeks to use available capacity when early weeks are full
-        # Vacuum moulding line capacities
-        self.BIG_LINE_HOURS_PER_SHIFT = 12
-        self.SMALL_LINE_HOURS_PER_SHIFT = 12
-        self.SHIFTS_PER_DAY = 2
-        self.BIG_LINE_HOURS_PER_DAY = self.BIG_LINE_HOURS_PER_SHIFT * self.SHIFTS_PER_DAY * self.OEE
-        self.SMALL_LINE_HOURS_PER_DAY = self.SMALL_LINE_HOURS_PER_SHIFT * self.SHIFTS_PER_DAY * self.OEE
-        self.BIG_LINE_HOURS_PER_WEEK = self.BIG_LINE_HOURS_PER_DAY * self.WORKING_DAYS_PER_WEEK
-        self.SMALL_LINE_HOURS_PER_WEEK = self.SMALL_LINE_HOURS_PER_DAY * self.WORKING_DAYS_PER_WEEK
-        
+
+        # ✅ Line capacities: ALL values come from Machine Constraints sheet in Excel
+        # No hardcoded line capacities - read from master data via machine_manager
+
         # ✅ FIXED: Vacuum timing penalty
         self.VACUUM_CAPACITY_PENALTY = 0.90  # 10% capacity reduction for vacuum parts (reduced from 25% to achieve 70-80% utilization)
         
@@ -2318,8 +2313,9 @@ class ComprehensiveResultsAnalyzer:
     def _generate_weekly_summary(self, stage_plans):
         weekly_data = []
         casting_cap = 1500  # Match the CASTING_TON_PER_WEEK constraint
-        big_line_cap_min = self.config.BIG_LINE_HOURS_PER_WEEK * 60
-        small_line_cap_min = self.config.SMALL_LINE_HOURS_PER_WEEK * 60
+        # ✅ Get line capacities from Machine Constraints (Excel), not hardcoded values
+        big_line_cap_min = self.machine_manager.get_machine_capacity('KVCV3BHCS001') * 60  # hrs to min
+        small_line_cap_min = self.machine_manager.get_machine_capacity('KVCVC3HCS001') * 60  # hrs to min
         vacuum_penalty = self.config.VACUUM_CAPACITY_PENALTY if self.config.VACUUM_CAPACITY_PENALTY else 1.0
         
         for w in self.weeks:
