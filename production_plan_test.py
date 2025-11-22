@@ -83,7 +83,7 @@ class ProductionConfig:
         self.VACUUM_CAPACITY_PENALTY = 0.75  # 25% capacity reduction for vacuum parts
         
         # Penalties
-        self.UNMET_DEMAND_PENALTY = 200000  # Cost of not fulfilling orders (increased 5x to force fulfillment)
+        self.UNMET_DEMAND_PENALTY = 10000000  # Cost of not fulfilling orders (must be >> lateness to force production)
         self.LATENESS_PENALTY = 150000  # Cost per week late (increased 3x from 50k to prioritize on-time delivery)
         self.INVENTORY_HOLDING_COST = 0  # MAXIMIZATION MODE: No penalty - keep 100% utilization till demand exhausted
         self.MAX_EARLY_WEEKS = 4  # Limit to 4 weeks early (with cost=0, only prevents VERY early production)
