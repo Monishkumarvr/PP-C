@@ -1008,8 +1008,9 @@ class MachineResourceManager:
             num_resources = self._safe_int(row.get('No Of Resource', 1))
             hours_per_day = self._safe_float(row.get('Available Hours per Day', 8))
             num_shifts = self._safe_int(row.get('No of Shift', 1))
-            
-            actual_hours_per_day = hours_per_day * num_shifts
+
+            # ✅ FIXED: "Available Hours per Day" is TOTAL hours per day (not per shift)
+            actual_hours_per_day = hours_per_day  # Already total, don't multiply by shifts
             total_hours_day = actual_hours_per_day * num_resources
             effective_hours_day = total_hours_day * self.config.OEE
             weekly_hours = effective_hours_day * self.config.WORKING_DAYS_PER_WEEK
@@ -1766,11 +1767,15 @@ class ComprehensiveOptimizationModel:
         """✅ COMPREHENSIVE: Casting constraints WITH pattern change setup time AND vacuum penalty."""
         print("  ✅ Adding casting capacity WITH SETUP TIME + VACUUM PENALTY...")
 
-        BIG_LINE_CAP = 12 * 2 * 0.9 * 6 * 60  # 7,776 min/week
-        SMALL_LINE_CAP = 12 * 2 * 0.9 * 6 * 60
+        # ✅ FIXED: Get capacity from Machine Constraints (not hardcoded)
+        BIG_LINE_CAP = self.machine_manager.get_machine_capacity('KVCV3BHCS001') * 60  # Convert hrs to min
+        SMALL_LINE_CAP = self.machine_manager.get_machine_capacity('KVCVC3HCS001') * 60  # Convert hrs to min
         CASTING_TON_PER_WEEK = 800
         SETUP_TIME = self.config.PATTERN_CHANGE_TIME_MIN
         VACUUM_PENALTY = self.config.VACUUM_CAPACITY_PENALTY
+
+        print(f"    ✓ Big Line capacity: {BIG_LINE_CAP:.0f} min/week ({BIG_LINE_CAP/60:.1f} hrs/week)")
+        print(f"    ✓ Small Line capacity: {SMALL_LINE_CAP:.0f} min/week ({SMALL_LINE_CAP/60:.1f} hrs/week)")
 
         for w in self.weeks:
             big_line_time = []
